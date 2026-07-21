@@ -161,6 +161,7 @@
 .auth-sheet label > span, .profile-form label > span, .profile-form legend, .checkout-sheet label > span, .reference-field > span { display: block; margin-bottom: 7px; color: #47544c; font-size: 11px; font-weight: 820; }
 .auth-sheet input, .auth-sheet select, .profile-form input, .profile-form select, .profile-form textarea, .checkout-sheet input, .checkout-sheet textarea, .reference-field input { width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid #dfe2dc; border-radius: 11px; color: #18231d; background: #fafbf9; outline: 0; }
 .auth-sheet select, .profile-form select { appearance: auto; cursor: pointer; }
+.flat-address-fields input::placeholder { color: #aab2ad; opacity: .72; }
 .auth-sheet input:focus, .auth-sheet select:focus, .profile-form input:focus, .profile-form select:focus, .profile-form textarea:focus, .checkout-sheet input:focus, .checkout-sheet textarea:focus, .reference-field input:focus { border-color: #82aa94; box-shadow: 0 0 0 3px #e5f0e9; }
 .auth-row, .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
 .flat-address-fields { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(105px, .55fr) minmax(0, 1.45fr); gap: 11px; }
