@@ -345,8 +345,12 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .login-card form { margin-top: 25px; }
 .login-card label { display: block; margin-top: 14px; color: #4c5951; font-size: 12px; font-weight: 800; }
 .login-card label:first-child { margin-top: 0; }
-.login-card input { width: 100%; min-height: 50px; display: block; margin-top: 7px; padding: 0 13px; border: 1px solid #d9e0dc; border-radius: 10px; outline: 0; }
-.login-card input:focus { border-color: #7da48d; box-shadow: 0 0 0 3px #e7f1eb; }
+.login-card input { width: 100%; min-height: 50px; display: block; margin-top: 7px; padding: 0 13px; border: 1px solid rgba(233, 91, 42, .10); border-radius: 10px; outline: 0; background: rgba(233, 91, 42, .10); }
+.login-card input::placeholder { color: #7b857f; opacity: .45; }
+.login-card input:-webkit-autofill,
+.login-card input:-webkit-autofill:hover,
+.login-card input:-webkit-autofill:focus { -webkit-text-fill-color: var(--ink); -webkit-box-shadow: 0 0 0 1000px #fff7f4 inset; transition: background-color 9999s ease-out; }
+.login-card input:focus { border-color: rgba(233, 91, 42, .25); box-shadow: 0 0 0 3px rgba(233, 91, 42, .08); }
 .login-card form button { width: 100%; min-height: 52px; margin-top: 19px; border-radius: 10px; color: #fff; background: var(--brand); font-size: 15px; font-weight: 800; }
 .login-card form .reset-password { margin-top: 9px; border: 1px solid #ead8d0; color: var(--brand-dark); background: var(--brand-soft); box-shadow: none; }
 .login-message { margin-top: 15px; padding: 11px; border-radius: 9px; font-size: 13px; }
@@ -357,8 +361,12 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dark-login .login-card { border-color: #303a34; background: #151d18; box-shadow: 0 24px 70px rgba(0,0,0,.32); }
 .dark-login .login-card > p { color: #aab5ae; }
 .dark-login .login-card label { color: #c5cec8; }
-.dark-login .login-card input { color-scheme: dark; color: #f3f6f4; border-color: #3a453e; background: #101712; -webkit-text-fill-color: #f3f6f4; }
-.dark-login .login-card input:focus { border-color: #5d8b70; box-shadow: 0 0 0 3px #20372a; }
+.dark-login .login-card input { color-scheme: dark; color: #f3f6f4; border-color: rgba(240, 120, 78, .10); background: rgba(240, 120, 78, .10); -webkit-text-fill-color: #f3f6f4; }
+.dark-login .login-card input::placeholder { color: #aab5ae; opacity: .42; }
+.dark-login .login-card input:-webkit-autofill,
+.dark-login .login-card input:-webkit-autofill:hover,
+.dark-login .login-card input:-webkit-autofill:focus { -webkit-text-fill-color: #f3f6f4; -webkit-box-shadow: 0 0 0 1000px #2a211c inset; }
+.dark-login .login-card input:focus { border-color: rgba(240, 120, 78, .28); box-shadow: 0 0 0 3px rgba(240, 120, 78, .09); }
 .dark-login .login-card form button { background: #c94a1b; }
 .dark-login .login-card form .reset-password { border-color: #5b3b31; color: #ffad91; background: #382118; }
 .dark-login .login-message.success { color: #8ed9ad; background: #183324; }
