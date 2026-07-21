@@ -1,6 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useMemo, useState } from "react";
-import { createClient, type Session } from "@supabase/supabase-js";
+import type { Session } from "@supabase/supabase-js";
 import {
   CalendarDays,
   Camera,
@@ -28,6 +28,9 @@ import {
   X,
 } from "lucide-react";
 import "./styles.css";
+import "./storefront.css";
+import { Storefront } from "./storefront";
+import { supabase } from "./supabase";
 
 type Stage =
   | "new"
@@ -62,6 +65,14 @@ type MenuItem = {
   photo_path: string | null;
   photo_url?: string;
   is_active: boolean;
+  description?: string;
+  dietary_type?: "veg" | "non_veg";
+  spice_level?: "mild" | "medium" | "spicy";
+  daily?: {
+    is_available: boolean;
+    is_featured: boolean;
+    portions_available: number | null;
+  };
 };
 type CustomerProfile = {
   customer_name: string;
@@ -73,13 +84,13 @@ type ExportOptions = {
   to: string;
   payment: "all" | "paid" | "pending";
 };
-
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-const supabase =
-  SUPABASE_URL && SUPABASE_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_KEY)
-    : null;
+type AdminStoreSettings = {
+  ordering_open: boolean;
+  hero_message: string;
+  upi_id: string;
+  merchant_name: string;
+  order_cutoff: string;
+};
 
 const stages: { key: Stage; label: string; short: string; color: string }[] = [
   { key: "new", label: "New", short: "New", color: "blue" },
@@ -150,7 +161,7 @@ async function getPrivatePhotoUrl(path: string, session: Session | null) {
   return URL.createObjectURL(await response.blob());
 }
 
-function App() {
+export function AdminApp() {
   const [selectedDate, setSelectedDate] = useState(today());
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
@@ -169,6 +180,9 @@ function App() {
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
+  const [adminChecked, setAdminChecked] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "", merchant_name: "Neeru's Kitchen", order_cutoff: "" });
 
   useEffect(() => {
     if (!supabase) return;
@@ -179,6 +193,19 @@ function App() {
     });
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!supabase || !session) {
+      setIsAdmin(false);
+      setAdminChecked(!session);
+      return;
+    }
+    setAdminChecked(false);
+    supabase.rpc("is_admin").then(({ data, error }) => {
+      setIsAdmin(!error && data === true);
+      setAdminChecked(true);
+    });
+  }, [session]);
 
   useEffect(() => {
     localStorage.setItem("neeru-text-size", large ? "large" : "standard");
@@ -212,25 +239,29 @@ function App() {
 
   async function loadMenu() {
     if (!supabase || !session) return;
-    const { data, error } = await supabase
-      .from("menu_items")
-      .select("*")
-      .eq("is_active", true)
-      .order("name");
+    const [{ data, error }, { data: daily }, { data: configuration }] = await Promise.all([
+      supabase.from("menu_items").select("*").eq("is_active", true).order("name"),
+      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available").eq("menu_date", today()),
+      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
+    ]);
     if (error || !data?.length) return;
+    const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
     const resolved = await Promise.all(
       (data as MenuItem[]).map(async (item) => {
+        const todayEntry = dailyMap.get(item.id);
+        const withDaily = { ...item, daily: { is_available: todayEntry?.is_available ?? true, is_featured: todayEntry?.is_featured ?? false, portions_available: todayEntry?.portions_available ?? null } };
         if (!item.photo_path) {
-          return { ...item, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
+          return { ...withDaily, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
         }
         return {
-          ...item,
+          ...withDaily,
           price: Number(item.price || 0),
           photo_url: await getPrivatePhotoUrl(item.photo_path, session),
         };
       }),
     );
     setMenuItems(resolved);
+    if (configuration) setStoreSettings({ ...configuration, order_cutoff: configuration.order_cutoff?.slice(0, 5) || "" } as AdminStoreSettings);
   }
 
   async function loadCustomers() {
@@ -275,7 +306,7 @@ function App() {
     const refresh = window.setInterval(loadOrders, 20_000);
     return () => {
       window.clearInterval(refresh);
-      supabase.removeChannel(channel);
+      supabase?.removeChannel(channel);
     };
   }, [selectedDate, session]);
 
@@ -332,6 +363,7 @@ function App() {
       photo_path: photoPath,
       amount: Number(values.amount),
       delivery_time: values.delivery_time || null,
+      payment_status: values.is_paid ? "verified" : "pending",
     };
     const result = editing
       ? await supabase.from("orders").update(record).eq("id", editing.id)
@@ -424,9 +456,26 @@ function App() {
     else loadMenu();
   }
 
+  async function updateDailyMenu(item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) {
+    if (!supabase) return;
+    const daily = { is_available: true, is_featured: false, portions_available: null, ...item.daily, ...changes };
+    const { error } = await supabase.from("daily_menu").upsert({ menu_item_id: item.id, menu_date: today(), ...daily }, { onConflict: "menu_item_id,menu_date" });
+    if (error) setNotice(`Could not update today's menu: ${error.message}`); else loadMenu();
+  }
+
+  async function saveStoreSettings(settings: AdminStoreSettings) {
+    if (!supabase) return;
+    const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...settings, order_cutoff: settings.order_cutoff || null });
+    if (error) setNotice(`Could not save storefront: ${error.message}`);
+    else { setStoreSettings(settings); setNotice("Customer storefront settings saved."); }
+  }
+
   async function updateOrder(id: string, changes: Partial<Order>) {
     if (!supabase) return;
-    const { error } = await supabase.from("orders").update(changes).eq("id", id);
+    const record = changes.is_paid === undefined
+      ? changes
+      : { ...changes, payment_status: changes.is_paid ? "verified" : "pending" };
+    const { error } = await supabase.from("orders").update(record).eq("id", id);
     if (error) setNotice(`Could not update: ${error.message}`);
     else loadOrders();
   }
@@ -452,6 +501,12 @@ function App() {
   if (supabase && !session) return <Login dark={dark} />;
   if (supabase && session && recoveringPassword) {
     return <PasswordReset dark={dark} onComplete={() => setRecoveringPassword(false)} />;
+  }
+  if (supabase && session && !adminChecked) {
+    return <main className="login-page"><section className="login-card admin-check"><LogoMark /><span className="loader" /><h1>Opening order desk…</h1><p>Checking family access securely.</p></section></main>;
+  }
+  if (supabase && session && !isAdmin) {
+    return <main className="login-page"><section className="login-card"><LogoMark /><p className="eyebrow">CUSTOMER ACCOUNT</p><h1>Family access only</h1><p>This account cannot open the kitchen order desk.</p><a className="login-link" href="/">Return to the customer menu</a><button className="login-signout" onClick={() => supabase?.auth.signOut()}>Sign out</button></section></main>;
   }
   return (
     <div className={`workspace ${phonePreview ? "preview-mode" : ""}`}>
@@ -562,7 +617,7 @@ function App() {
               )}
             </>
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} onAdd={() => setMenuAdding(true)} onRemove={removeMenuItem} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onRemove={removeMenuItem} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
@@ -617,7 +672,7 @@ function Login({ dark }: { dark: boolean }) {
       return;
     }
     const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: window.location.origin,
+      redirectTo: `${window.location.origin}/admin`,
     });
     setMessage(error ? `Could not send the reset email: ${error.message}` : "Password email sent. Open it on this phone and follow the secure link.");
   }
@@ -746,19 +801,38 @@ function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; m
   return <div className="order-list">{orders.map((o, i) => { const image = o.photo_url || menuImageFor(o, menuItems); return <div className="order-row" key={o.id} onClick={() => onEdit(o)}><span className="serial">{String(i + 1).padStart(2, "0")}</span>{image ? <img src={image} alt="" /> : <span className="row-placeholder"><ChefHat /></span>}<div className="row-customer"><b>{o.customer_name}</b><small>Flat {o.flat_number} · {o.order_details}</small></div><span className="row-time">{o.delivery_time?.slice(0, 5) || "—"}</span><b className="row-amount">{money(Number(o.amount))}</b><StageBadge stage={o.stage} /><button className={o.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : "Pending"}</button></div>; })}</div>;
 }
 
-function MenuScreen({ items, onAdd, onRemove, onOrder }: { items: MenuItem[]; onAdd: () => void; onRemove: (item: MenuItem) => void; onOrder: (item: MenuItem) => void }) {
+function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onRemove, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onRemove: (item: MenuItem) => void; onOrder: (item: MenuItem) => void }) {
+  const [form, setForm] = useState(settings);
+  useEffect(() => setForm(settings), [settings]);
+  const set = <K extends keyof AdminStoreSettings>(key: K, value: AdminStoreSettings[K]) => setForm((current) => ({ ...current, [key]: value }));
   return (
     <>
-      <section className="page-heading menu-heading"><div><span className="eyebrow">KITCHEN CATALOGUE</span><h1>Food menu</h1><p>Tap a dish to start an order. Add your real recipes and photos anytime.</p></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add food item</button></section>
+      <section className="page-heading menu-heading"><div><span className="eyebrow">KITCHEN CATALOGUE</span><h1>Food menu</h1><p>Choose what customers can order today and what appears as featured.</p></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add food item</button></section>
+      <section className="storefront-manager">
+        <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
+        <div className="manager-fields">
+          <label className="ordering-toggle"><input type="checkbox" checked={form.ordering_open} onChange={(event) => set("ordering_open", event.target.checked)} /><span><b>{form.ordering_open ? "Orders open" : "Orders paused"}</b><small>Customers {form.ordering_open ? "can place new orders" : "can browse but cannot order"}</small></span></label>
+          <label><span>Customer message</span><input value={form.hero_message} onChange={(event) => set("hero_message", event.target.value)} /></label>
+          <label><span>Kitchen UPI ID</span><input value={form.upi_id} onChange={(event) => set("upi_id", event.target.value)} placeholder="yourname@bank" /></label>
+          <label><span>Merchant name</span><input value={form.merchant_name} onChange={(event) => set("merchant_name", event.target.value)} /></label>
+          <label><span>Order cutoff</span><input type="time" value={form.order_cutoff} onChange={(event) => set("order_cutoff", event.target.value)} /></label>
+          <button className="primary manager-save" onClick={() => onSaveSettings(form)}><Check size={18} /> Save storefront</button>
+        </div>
+      </section>
+      <div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>Turn dishes on, feature favourites and set portions.</small></div>
       <section className="menu-grid">
         {items.map((item) => <article className="menu-card" key={item.id}>
           <button className="menu-image" onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>Order this</em></button>
           <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.price ? money(item.price) : "Set price in order"}</span></div><button className="remove-food" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`}><Trash2 size={17} /></button></div>
+          <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} onClick={() => onDaily(item, { is_available: !item.daily?.is_available })}><Check size={14} /> Today</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Portions</span><input type="number" min="0" placeholder="∞" value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
       </section>
     </>
   );
 }
+
+function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
+function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
 function SettingsScreen({ large, dark, selectedDate, customerCount, onLarge, onDark, onExport, onSignOut }: { large: boolean; dark: boolean; selectedDate: string; customerCount: number; onLarge: (large: boolean) => void; onDark: (dark: boolean) => void; onExport: (options: ExportOptions) => void; onSignOut: () => void }) {
   const [exportOptions, setExportOptions] = useState<ExportOptions>({ from: selectedDate, to: selectedDate, payment: "all" });
@@ -932,4 +1006,8 @@ function Choice({ label, options, value, onChange }: { label: string; options: s
   return <fieldset><legend>{label}</legend><div className="choice">{options.map(([key, text]) => <button type="button" className={value === key ? "selected" : ""} key={key} onClick={() => onChange(key)}>{key === "nanny" ? <CircleUserRound size={18} /> : <UtensilsCrossed size={18} />}{text}</button>)}</div></fieldset>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+function Root() {
+  return window.location.pathname.startsWith("/admin") ? <AdminApp /> : <Storefront />;
+}
+
+createRoot(document.getElementById("root")!).render(<Root />);

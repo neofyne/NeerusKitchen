@@ -5,7 +5,7 @@ const STORE_NAME = "neeru-private-photos";
 const MAX_PHOTO_SIZE = 6 * 1024 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 
-async function getFamilyUser(request: Request) {
+async function getAuthenticatedUser(request: Request) {
   const authorization = request.headers.get("authorization");
   const supabaseUrl = process.env.VITE_SUPABASE_URL;
   const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
@@ -18,13 +18,27 @@ async function getFamilyUser(request: Request) {
   return (await response.json()) as { id: string };
 }
 
-export default async (request: Request) => {
-  const user = await getFamilyUser(request);
-  if (!user) return Response.json({ error: "Not authorized" }, { status: 401 });
+async function isFamilyAdmin(request: Request) {
+  const authorization = request.headers.get("authorization");
+  const supabaseUrl = process.env.VITE_SUPABASE_URL;
+  const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  if (!authorization?.startsWith("Bearer ") || !supabaseUrl || !supabaseKey) return false;
+  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/is_admin`, {
+    method: "POST",
+    headers: { Authorization: authorization, apikey: supabaseKey, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return response.ok && (await response.json()) === true;
+}
 
+export default async (request: Request) => {
   const store = getStore({ name: STORE_NAME, consistency: "strong" });
 
   if (request.method === "POST") {
+    const user = await getAuthenticatedUser(request);
+    if (!user || !(await isFamilyAdmin(request))) {
+      return Response.json({ error: "Family administrator access required" }, { status: 403 });
+    }
     const form = await request.formData();
     const photo = form.get("photo");
     const purpose = form.get("purpose");
@@ -49,6 +63,9 @@ export default async (request: Request) => {
     const validKey = /^(orders|menu)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
     if (!key || !validKey.test(key)) {
       return Response.json({ error: "Photo not found" }, { status: 404 });
+    }
+    if (key.startsWith("orders/") && !(await isFamilyAdmin(request))) {
+      return Response.json({ error: "Family administrator access required" }, { status: 403 });
     }
     const entry = await store.getWithMetadata(key, { type: "arrayBuffer", consistency: "strong" });
     if (!entry?.data) return Response.json({ error: "Photo not found" }, { status: 404 });
