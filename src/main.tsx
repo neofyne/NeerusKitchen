@@ -756,17 +756,17 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
   return (
     <article className={`card card-${order.stage}`} onClick={() => onEdit(order)}>
       <div className="card-body">
+        <div className="card-top">
+          <StageBadge stage={order.stage} />
+          <button className={order.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{order.is_paid ? "Paid" : "Pending"}</button>
+        </div>
         <div className="card-summary-layout">
           <span className="order-thumb">{image ? <img src={image} alt="" /> : <ChefHat />}</span>
           <div className="card-summary-copy">
-            <div className="card-top">
-              <StageBadge stage={order.stage} />
-              <button className={order.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={15} />{order.is_paid ? "Paid" : "Pending"}</button>
-            </div>
             <div className="customer-line"><div><h3>{order.customer_name}</h3><span>Flat {order.flat_number}</span></div><strong>{money(Number(order.amount))}</strong></div>
+            <p className="food"><b>{order.order_details}</b></p>
           </div>
         </div>
-        <p className="food"><small>ORDER</small><b>{order.order_details}</b></p>
         {order.remarks && <p className="remark">{order.remarks}</p>}
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
