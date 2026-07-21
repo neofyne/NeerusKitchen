@@ -512,7 +512,7 @@ export function AdminApp() {
     return <main className="login-page"><section className="login-card admin-check"><LogoMark /><span className="loader" /><h1>Opening order desk…</h1><p>Checking family access securely.</p></section></main>;
   }
   if (supabase && session && !isAdmin) {
-    return <main className="login-page"><section className="login-card"><LogoMark /><p className="eyebrow">CUSTOMER ACCOUNT</p><h1>Family access only</h1><p>This account cannot open the kitchen order desk.</p><a className="login-link" href="/">Return to the customer menu</a><button className="login-signout" onClick={() => supabase?.auth.signOut()}>Sign out</button></section></main>;
+    return <main className="login-page"><section className="login-card"><LogoMark /><p className="eyebrow">CUSTOMER ACCOUNT</p><h1>Family access only</h1><p>This account cannot open the kitchen order desk.</p><a className="login-link" href="/">Return to the customer menu</a><button className="login-signout" onClick={() => supabase?.auth.signOut()}>Use a different admin account</button></section></main>;
   }
   return (
     <div className={`workspace ${phonePreview ? "preview-mode" : ""}`}>

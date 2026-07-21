@@ -21,7 +21,7 @@ import {
   UtensilsCrossed,
   X,
 } from "lucide-react";
-import { supabase } from "./supabase";
+import { storefrontSupabase as supabase } from "./supabase";
 
 type StoreView = "menu" | "cart" | "orders" | "account";
 type Spice = "mild" | "medium" | "spicy";
