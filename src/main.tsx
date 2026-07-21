@@ -170,10 +170,6 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
 
-  const isMacLocal =
-    ["localhost", "127.0.0.1"].includes(location.hostname) &&
-    /Mac/i.test(navigator.platform || navigator.userAgent);
-
   useEffect(() => {
     if (!supabase) return;
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -459,12 +455,14 @@ function App() {
   }
   return (
     <div className={`workspace ${phonePreview ? "preview-mode" : ""}`}>
-      {isMacLocal && (
-        <button className="device-switch" onClick={() => setPhonePreview(!phonePreview)}>
-          <Smartphone size={18} />
-          {phonePreview ? "Exit phone preview" : "Preview on phone"}
-        </button>
-      )}
+      <button
+        className="device-switch"
+        onClick={() => setPhonePreview(!phonePreview)}
+        aria-pressed={phonePreview}
+      >
+        <Smartphone size={18} />
+        {phonePreview ? "Exit phone preview" : "Preview on phone"}
+      </button>
       <div className={`app-frame ${large ? "large" : ""} ${dark ? "dark" : ""}`}>
         <main className="app">
           <header className="app-header">
