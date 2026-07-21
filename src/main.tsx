@@ -1021,7 +1021,9 @@ function Choice({ label, options, value, onChange }: { label: string; options: s
 }
 
 function Root() {
-  return window.location.pathname.startsWith("/admin") ? <AdminApp /> : <Storefront />;
+  const isAdmin = window.location.pathname.startsWith("/admin");
+  document.title = isAdmin ? "Neeru’s Kitchen · Family Order Desk" : "Neeru’s Kitchen · Vegetarian Home Kitchen";
+  return isAdmin ? <AdminApp /> : <Storefront />;
 }
 
 createRoot(document.getElementById("root")!).render(<Root />);
