@@ -10,7 +10,6 @@ import {
   Clock3,
   Flame,
   Home,
-  Leaf,
   LogOut,
   Minus,
   Plus,
@@ -25,7 +24,6 @@ import {
 import { supabase } from "./supabase";
 
 type StoreView = "menu" | "cart" | "orders" | "account";
-type Diet = "veg" | "non_veg";
 type Spice = "mild" | "medium" | "spicy";
 
 type StoreMenuItem = {
@@ -33,7 +31,6 @@ type StoreMenuItem = {
   name: string;
   price: number;
   description: string;
-  dietary_type: Diet;
   spice_level: Spice;
   photo_path: string | null;
   image_url?: string;
@@ -47,7 +44,6 @@ type Profile = {
   flat_number: string;
   email: string;
   phone: string;
-  dietary_preference: "veg" | "non_veg" | "any";
   spice_preference: Spice;
   standing_instructions: string;
 };
@@ -95,7 +91,7 @@ const starterCatalog = [
   ["curd-rice", "Curd rice", 130],
   ["aloo-paratha", "Aloo paratha", 90],
   ["poha", "Poha", 80],
-].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", dietary_type: "veg", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
+].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
 
 const stageLabels: Record<string, string> = {
   new: "Order placed",
@@ -132,7 +128,6 @@ export function Storefront() {
   const [settings, setSettings] = useState<StoreSettings>(defaultSettings);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [diet, setDiet] = useState<"all" | Diet>("all");
   const [authOpen, setAuthOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [placedOrder, setPlacedOrder] = useState<CustomerOrder | null>(null);
@@ -171,7 +166,7 @@ export function Storefront() {
     if (!supabase) return setLoading(false);
     setLoading(true);
     const [{ data: menu }, { data: daily }, { data: configuration }] = await Promise.all([
-      supabase.from("menu_items").select("id,name,price,description,dietary_type,spice_level,photo_path").eq("is_active", true).order("name"),
+      supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path").eq("is_active", true).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", localToday()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
     ]);
@@ -188,7 +183,6 @@ export function Storefront() {
         ...row,
         price: Number(today?.special_price ?? row.price ?? 0),
         description: row.description || "Comforting home-style food, made fresh today.",
-        dietary_type: (row.dietary_type || "veg") as Diet,
         spice_level: (row.spice_level || "mild") as Spice,
         image_url: row.photo_path ? `/api/photos?key=${encodeURIComponent(row.photo_path)}` : starterImages[row.name],
         is_featured: Boolean(today?.is_featured),
@@ -213,11 +207,8 @@ export function Storefront() {
 
   const visibleItems = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return items.filter((item) =>
-      (diet === "all" || item.dietary_type === diet) &&
-      (!query || `${item.name} ${item.description}`.toLowerCase().includes(query)),
-    );
-  }, [items, search, diet]);
+    return items.filter((item) => !query || `${item.name} ${item.description}`.toLowerCase().includes(query));
+  }, [items, search]);
   const featured = items.filter((item) => item.is_featured);
   const cartLines = items.filter((item) => cart[item.id]).map((item) => ({ ...item, quantity: cart[item.id] }));
   const cartCount = cartLines.reduce((total, item) => total + item.quantity, 0);
@@ -252,9 +243,13 @@ export function Storefront() {
       </button>
       <div className="storefront">
       <header className="store-header">
-        <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>HOME-COOKED WITH LOVE</small></span></button>
+        <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
         <div className="store-header-actions">
           <a className="family-link" href="/admin">Family desk</a>
+          <button className={`header-cart-button ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")} aria-label={cartCount ? `Cart, ${cartCount} items, ${formatMoney(cartTotal)}` : "Cart, empty"}>
+            <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
+            <span className="header-cart-copy"><small>Cart</small><strong>{cartCount > 0 ? formatMoney(cartTotal) : "Empty"}</strong></span>
+          </button>
           <button className="account-button" onClick={() => go("account")} aria-label="Account"><CircleUserRound /></button>
         </div>
       </header>
@@ -272,7 +267,7 @@ export function Storefront() {
 
           <section className="menu-section">
             <div className="store-section-title"><div><span className="store-eyebrow">FRESHLY PREPARED</span><h2>Today’s menu</h2></div><span>{visibleItems.length} dishes</span></div>
-            <div className="store-filters"><label><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search the menu" /></label><div><button className={diet === "all" ? "active" : ""} onClick={() => setDiet("all")}>All</button><button className={diet === "veg" ? "active" : ""} onClick={() => setDiet("veg")}><Leaf /> Veg</button><button className={diet === "non_veg" ? "active" : ""} onClick={() => setDiet("non_veg")}>Non-veg</button></div></div>
+            <div className="store-filters"><label><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search today’s vegetarian menu" /></label></div>
             {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-grid">{visibleItems.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
           </section>
         </>}
@@ -288,7 +283,6 @@ export function Storefront() {
         <button className={`cart-nav ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")}><span className="cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span><span>Cart</span></button>
       </nav>
 
-      {cartCount > 0 && view === "menu" && <button className="floating-cart" onClick={() => go("cart")}><span><ShoppingBag /><b>{cartCount} {cartCount === 1 ? "item" : "items"}</b></span><strong>{formatMoney(cartTotal)} <ChevronRight /></strong></button>}
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
@@ -305,7 +299,7 @@ function FoodCard({ item, quantity, onQuantity, featured = false }: { item: Stor
   const soldOut = item.portions_available === 0;
   return <article className={`store-food-card ${featured ? "featured-card" : ""} ${soldOut ? "sold-out" : ""}`}>
     <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
-    <div className="food-card-copy"><div className="food-meta"><span className={`diet-dot ${item.dietary_type}`}><i /></span><span>{item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><strong>{formatMoney(item.price)}</strong>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
+    <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><strong>{formatMoney(item.price)}</strong>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
   </article>;
 }
 
@@ -345,7 +339,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
 }
 
 function AccountView({ session, profile, onSaved, onBack }: { session: Session; profile: Profile | null; onSaved: (profile: Profile) => void; onBack: () => void }) {
-  const [form, setForm] = useState<Profile>(profile || { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: "", dietary_preference: "veg", spice_preference: "mild", standing_instructions: "" });
+  const [form, setForm] = useState<Profile>(profile || { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: "", spice_preference: "mild", standing_instructions: "" });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const set = <K extends keyof Profile>(key: K, value: Profile[K]) => setForm((current) => ({ ...current, [key]: value }));
@@ -354,7 +348,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
     const { error } = await supabase.from("customer_profiles").upsert(form);
     setBusy(false); if (error) setMessage(error.message); else onSaved(form);
   }
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><label><span>Flat number</span><input value={form.flat_number} onChange={(event) => set("flat_number", event.target.value)} required /></label><label><span>Email</span><input value={form.email} disabled /></label><label><span>Phone <small>Optional</small></span><input type="tel" value={form.phone} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Food preference</legend><div className="profile-choices">{[["veg", "Vegetarian"], ["non_veg", "Non-vegetarian"], ["any", "Anything"]].map(([key, label]) => <button type="button" className={form.dietary_preference === key ? "selected" : ""} onClick={() => set("dietary_preference", key as Profile["dietary_preference"])} key={key}>{label}</button>)}</div></fieldset><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><label><span>Flat number</span><input value={form.flat_number} onChange={(event) => set("flat_number", event.target.value)} required /></label><label><span>Email</span><input value={form.email} disabled /></label><label><span>Phone <small>Optional</small></span><input type="tel" value={form.phone} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {

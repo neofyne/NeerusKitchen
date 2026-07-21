@@ -32,8 +32,6 @@ create policy "Admins can read admin users" on public.admin_users
   for select to authenticated using (public.is_admin());
 
 alter table public.menu_items add column if not exists description text not null default '';
-alter table public.menu_items add column if not exists dietary_type text not null default 'veg'
-  check (dietary_type in ('veg', 'non_veg'));
 alter table public.menu_items add column if not exists spice_level text not null default 'mild'
   check (spice_level in ('mild', 'medium', 'spicy'));
 
@@ -54,8 +52,6 @@ create table if not exists public.customer_profiles (
   flat_number text not null default '',
   email text not null default '',
   phone text not null default '',
-  dietary_preference text not null default 'veg'
-    check (dietary_preference in ('veg', 'non_veg', 'any')),
   spice_preference text not null default 'mild'
     check (spice_preference in ('mild', 'medium', 'spicy')),
   standing_instructions text not null default '',

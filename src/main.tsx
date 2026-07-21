@@ -66,7 +66,6 @@ type MenuItem = {
   photo_url?: string;
   is_active: boolean;
   description?: string;
-  dietary_type?: "veg" | "non_veg";
   spice_level?: "mild" | "medium" | "spicy";
   daily?: {
     is_available: boolean;
