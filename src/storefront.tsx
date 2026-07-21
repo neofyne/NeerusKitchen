@@ -25,6 +25,7 @@ import { supabase } from "./supabase";
 
 type StoreView = "menu" | "cart" | "orders" | "account";
 type Spice = "mild" | "medium" | "spicy";
+type Wing = "" | "A" | "B" | "C" | "D";
 
 type StoreMenuItem = {
   id: string;
@@ -117,6 +118,12 @@ const localToday = () => {
 };
 
 const formatMoney = (amount: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(amount)}`;
+const splitFlatAddress = (value = "") => {
+  const normalized = value.trim().toUpperCase();
+  const match = normalized.match(/^([A-D])[-\s]?(\d+)$/);
+  return match ? { wing: match[1] as Wing, number: match[2] } : { wing: "" as Wing, number: normalized.replace(/\D/g, "") };
+};
+const flatAddress = (wing: Wing, number: string) => `${wing}-${number}`;
 
 export function Storefront() {
   const [view, setView] = useState<StoreView>("menu");
@@ -316,12 +323,34 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [wing, setWing] = useState<Wing>("");
   const [flat, setFlat] = useState("");
+  const [flatWarning, setFlatWarning] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [messageIsSuccess, setMessageIsSuccess] = useState(false);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
+
+  function updateFlat(value: string) {
+    if (/\D/.test(value)) {
+      setFlatWarning("Please enter only numbers for the flat number.");
+      setFlat(value.replace(/\D/g, ""));
+      return;
+    }
+    setFlatWarning("");
+    setFlat(value);
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!supabase) return;
+    setMessage("");
+    setMessageIsSuccess(false);
+    if (mode === "register" && (!wing || !flat)) {
+      if (!flat) setFlatWarning("Please enter your flat number using numbers only.");
+      setMessage(!wing ? "Please choose your building wing." : "Please enter your flat number.");
+      return;
+    }
     setBusy(true);
     if (mode === "login") {
       const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -329,26 +358,75 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
       if (error) setMessage("That email or password is not correct."); else onSuccess();
       return;
     }
-    const { data, error } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin, data: { full_name: name.trim(), flat_number: flat.trim() } } });
+    const { data, error } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin, data: { full_name: name.trim(), flat_number: flatAddress(wing, flat) } } });
     setBusy(false);
     if (error) return setMessage(error.message);
-    if (!data.session) return setMessage("Check your email and confirm your account. Then return here to sign in.");
+    if (data.user?.identities?.length === 0) {
+      setAwaitingConfirmation(true);
+      return setMessage("This email may already have an account. Try Sign in, or resend the confirmation email below.");
+    }
+    if (!data.session) {
+      setAwaitingConfirmation(true);
+      setMessageIsSuccess(true);
+      return setMessage(`We sent a confirmation link to ${email.trim()}. Check Spam or Promotions too.`);
+    }
     onSuccess();
   }
-  return <div className="store-modal-bg"><section className="auth-sheet"><button className="sheet-close" onClick={onClose}><X /></button><StoreLogo /><span className="store-eyebrow">WELCOME TO NEERU’S</span><h2>{mode === "register" ? "Create your account" : "Welcome back"}</h2><p>{mode === "register" ? "Save your flat and preferences for faster ordering." : "Sign in to order and follow your meals."}</p><div className="auth-tabs"><button className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>New customer</button><button className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Sign in</button></div><form onSubmit={submit}>{mode === "register" && <div className="auth-row"><label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label><span>Flat number</span><input value={flat} onChange={(event) => setFlat(event.target.value)} required /></label></div>}<label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label><label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? "Create account" : "Sign in"}</button></form><small>By continuing, you agree to use your details only for kitchen orders and delivery.</small></section></div>;
+
+  async function resendConfirmation() {
+    if (!supabase || !email.trim()) return;
+    setBusy(true);
+    setMessage("");
+    const { error } = await supabase.auth.resend({ type: "signup", email: email.trim(), options: { emailRedirectTo: window.location.origin } });
+    setBusy(false);
+    setMessageIsSuccess(!error);
+    setMessage(error ? error.message : `A new confirmation link was sent to ${email.trim()}.`);
+  }
+
+  function switchMode(next: "login" | "register") {
+    setMode(next);
+    setMessage("");
+    setMessageIsSuccess(false);
+    setAwaitingConfirmation(false);
+  }
+
+  return <div className="store-modal-bg"><section className="auth-sheet"><button className="sheet-close" onClick={onClose}><X /></button><StoreLogo /><span className="store-eyebrow">WELCOME TO NEERU’S</span><h2>{mode === "register" ? "Create your account" : "Welcome back"}</h2><p>{mode === "register" ? "Save your address for faster ordering." : "Sign in to order and follow your meals."}</p><div className="auth-tabs"><button className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>New customer</button><button className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>Sign in</button></div><form onSubmit={submit}>{mode === "register" && <><label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div></>}<label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label><label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>{message && <div className={`auth-message ${messageIsSuccess ? "success" : ""}`}>{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? "Create account" : "Sign in"}</button>{awaitingConfirmation && <button className="resend-confirmation" type="button" disabled={busy} onClick={resendConfirmation}>Resend confirmation email</button>}</form><small>By continuing, you agree to use your details only for kitchen orders and delivery.</small></section></div>;
 }
 
 function AccountView({ session, profile, onSaved, onBack }: { session: Session; profile: Profile | null; onSaved: (profile: Profile) => void; onBack: () => void }) {
-  const [form, setForm] = useState<Profile>(profile || { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: "", spice_preference: "mild", standing_instructions: "" });
+  const defaultProfile = profile || { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: "", spice_preference: "mild" as Spice, standing_instructions: "" };
+  const initialAddress = splitFlatAddress(defaultProfile.flat_number);
+  const [form, setForm] = useState<Profile>(defaultProfile);
+  const [wing, setWing] = useState<Wing>(initialAddress.wing);
+  const [flat, setFlat] = useState(initialAddress.number);
+  const [flatWarning, setFlatWarning] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const set = <K extends keyof Profile>(key: K, value: Profile[K]) => setForm((current) => ({ ...current, [key]: value }));
-  async function save(event: React.FormEvent) {
-    event.preventDefault(); if (!supabase) return; setBusy(true);
-    const { error } = await supabase.from("customer_profiles").upsert(form);
-    setBusy(false); if (error) setMessage(error.message); else onSaved(form);
+
+  function updateFlat(value: string) {
+    if (/\D/.test(value)) {
+      setFlatWarning("Please enter only numbers for the flat number.");
+      setFlat(value.replace(/\D/g, ""));
+      return;
+    }
+    setFlatWarning("");
+    setFlat(value);
   }
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><label><span>Flat number</span><input value={form.flat_number} onChange={(event) => set("flat_number", event.target.value)} required /></label><label><span>Email</span><input value={form.email} disabled /></label><label><span>Phone <small>Optional</small></span><input type="tel" value={form.phone} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
+
+  async function save(event: React.FormEvent) {
+    event.preventDefault(); if (!supabase) return;
+    if (!wing || !flat) {
+      if (!flat) setFlatWarning("Please enter your flat number using numbers only.");
+      setMessage(!wing ? "Please choose your building wing." : "Please enter your flat number.");
+      return;
+    }
+    setBusy(true);
+    const next = { ...form, flat_number: flatAddress(wing, flat) };
+    const { error } = await supabase.from("customer_profiles").upsert(next);
+    setBusy(false); if (error) setMessage(error.message); else onSaved(next);
+  }
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div><label><span>Email</span><input value={form.email} disabled /></label><label><span>Phone <small>Optional</small></span><input type="tel" value={form.phone} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {

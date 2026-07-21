@@ -159,11 +159,19 @@
 .auth-tabs button.active { color: #173e2d; background: #fff; box-shadow: 0 2px 8px rgba(25,37,29,.08); }
 .auth-sheet form, .profile-form, .checkout-sheet { display: grid; gap: 14px; }
 .auth-sheet label > span, .profile-form label > span, .profile-form legend, .checkout-sheet label > span, .reference-field > span { display: block; margin-bottom: 7px; color: #47544c; font-size: 11px; font-weight: 820; }
-.auth-sheet input, .profile-form input, .profile-form textarea, .checkout-sheet input, .checkout-sheet textarea, .reference-field input { width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid #dfe2dc; border-radius: 11px; color: #18231d; background: #fafbf9; outline: 0; }
-.auth-sheet input:focus, .profile-form input:focus, .profile-form textarea:focus, .checkout-sheet input:focus, .checkout-sheet textarea:focus, .reference-field input:focus { border-color: #82aa94; box-shadow: 0 0 0 3px #e5f0e9; }
+.auth-sheet input, .auth-sheet select, .profile-form input, .profile-form select, .profile-form textarea, .checkout-sheet input, .checkout-sheet textarea, .reference-field input { width: 100%; min-height: 48px; padding: 10px 12px; border: 1px solid #dfe2dc; border-radius: 11px; color: #18231d; background: #fafbf9; outline: 0; }
+.auth-sheet select, .profile-form select { appearance: auto; cursor: pointer; }
+.auth-sheet input:focus, .auth-sheet select:focus, .profile-form input:focus, .profile-form select:focus, .profile-form textarea:focus, .checkout-sheet input:focus, .checkout-sheet textarea:focus, .reference-field input:focus { border-color: #82aa94; box-shadow: 0 0 0 3px #e5f0e9; }
 .auth-row, .profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+.flat-address-fields { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(105px, .55fr) minmax(0, 1.45fr); gap: 11px; }
+.field-warning input { border-color: #d68061; background: #fffaf7; box-shadow: 0 0 0 3px rgba(216, 128, 97, .1); }
+.field-warning-text { display: flex; align-items: center; gap: 5px; margin-top: 6px; color: #a64b2d !important; font-size: 9px !important; font-weight: 720 !important; line-height: 1.35; animation: warning-in .18s ease-out; }
+.field-warning-text::before { content: "!"; width: 14px; height: 14px; display: grid; place-items: center; flex: 0 0 14px; border-radius: 50%; color: #fff; background: #c45b37; font-size: 8px; font-weight: 900; }
+@keyframes warning-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
 .auth-message { padding: 10px 11px; border-radius: 9px; color: #8d432e; background: #fff1eb; font-size: 11px; line-height: 1.4; }
 .auth-message.success { color: #216c48; background: #e9f7ef; }
+.resend-confirmation { min-height: 42px; border: 1px solid #bcd6c8; border-radius: 11px; color: #255f45; background: #f3faf6; font-size: 11px; font-weight: 820; }
+.resend-confirmation:disabled { opacity: .55; }
 .auth-sheet > small { display: block; margin-top: 14px; color: #8a938d; font-size: 9px; line-height: 1.5; text-align: center; }
 .profile-form { padding: 21px; border: 1px solid var(--store-line); border-radius: 17px; background: #fff; }
 .profile-form input:disabled { color: #7b857f; background: #f1f2ef; }
@@ -271,6 +279,7 @@
   .store-modal-bg { place-items: end center; padding: 0; }
   .auth-sheet, .checkout-sheet, .payment-sheet { width: 100%; max-height: 96dvh; padding: 24px 17px calc(20px + env(safe-area-inset-bottom)); border-radius: 24px 24px 0 0; }
   .auth-row, .profile-grid { grid-template-columns: 1fr; }
+  .flat-address-fields { grid-template-columns: 105px minmax(0, 1fr); }
   .profile-form { padding: 16px; }
   .upi-panel { grid-template-columns: 112px 1fr; gap: 12px; padding: 11px; }
   .upi-panel img { width: 112px; }
