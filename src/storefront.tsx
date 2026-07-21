@@ -93,6 +93,7 @@ const starterCatalog = [
   ["aloo-paratha", "Aloo paratha", 90],
   ["poha", "Poha", 80],
 ].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
+const starterFeaturedNames = new Set(starterCatalog.filter((item) => item.is_featured).map((item) => item.name));
 
 const stageLabels: Record<string, string> = {
   new: "Order placed",
@@ -178,6 +179,7 @@ export function Storefront() {
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
     ]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
+    const hasFeaturedSelection = Boolean(daily?.some((entry) => entry.is_featured));
     if (!menu) {
       setItems(starterCatalog);
       setLoading(false);
@@ -192,7 +194,7 @@ export function Storefront() {
         description: row.description || "Comforting home-style food, made fresh today.",
         spice_level: (row.spice_level || "mild") as Spice,
         image_url: row.photo_path ? `/api/photos?key=${encodeURIComponent(row.photo_path)}` : starterImages[row.name],
-        is_featured: Boolean(today?.is_featured),
+        is_featured: Boolean(today?.is_featured) || (!hasFeaturedSelection && starterFeaturedNames.has(row.name)),
         portions_available: today?.portions_available ?? null,
       }];
     }));
@@ -257,7 +259,7 @@ export function Storefront() {
             <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
             <span className="header-cart-copy"><small>Cart</small><strong>{cartCount > 0 ? formatMoney(cartTotal) : "Empty"}</strong></span>
           </button>
-          <button className="account-button" onClick={() => go("account")} aria-label="Account"><CircleUserRound /></button>
+          <button className={`account-button ${session ? "" : "sign-in"}`} onClick={() => go("account")} aria-label={session ? "Account" : "Sign in"}><CircleUserRound /><span>{session ? "Account" : "Sign in"}</span></button>
         </div>
       </header>
 
@@ -315,7 +317,7 @@ function CartView({ lines, total, orderingOpen, onQuantity, onBack, onCheckout }
 }
 
 function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>Follow every meal from Neeru’s kitchen to your door.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${order.stage}`}><i />{stageLabels[order.stage] || order.stage}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : "Payment pending"}</span></div></article>)}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>Follow every meal from Neeru’s kitchen to your door.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${order.stage}`}><i />{stageLabels[order.stage] || order.stage}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>)}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
 }
 
 function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {

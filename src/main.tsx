@@ -17,6 +17,7 @@ import {
   List,
   Moon,
   Plus,
+  ReceiptText,
   Search,
   Settings2,
   Smartphone,
@@ -56,6 +57,10 @@ type Order = {
   remarks: string;
   photo_path: string | null;
   photo_url?: string;
+  source?: "family" | "customer";
+  payment_status?: "pending" | "submitted" | "verified" | "failed" | "refunded";
+  payment_reference?: string | null;
+  payment_method?: "upi" | "cash";
 };
 type Draft = Omit<Order, "id">;
 type MenuItem = {
@@ -121,6 +126,7 @@ const starterMenu: MenuItem[] = [
 }));
 
 const starterImage = new Map(starterMenu.map((item) => [item.name.toLowerCase(), item.photo_url]));
+const starterFeaturedNames = new Set(["Veg sandwich", "Paneer sandwich", "Masala khichdi"]);
 const today = () => {
   const local = new Date();
   local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
@@ -245,10 +251,11 @@ export function AdminApp() {
     ]);
     if (error || !data?.length) return;
     const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
+    const hasFeaturedSelection = Boolean(daily?.some((entry) => entry.is_featured));
     const resolved = await Promise.all(
       (data as MenuItem[]).map(async (item) => {
         const todayEntry = dailyMap.get(item.id);
-        const withDaily = { ...item, daily: { is_available: todayEntry?.is_available ?? true, is_featured: todayEntry?.is_featured ?? false, portions_available: todayEntry?.portions_available ?? null } };
+        const withDaily = { ...item, daily: { is_available: todayEntry?.is_available ?? true, is_featured: Boolean(todayEntry?.is_featured) || (!hasFeaturedSelection && starterFeaturedNames.has(item.name)), portions_available: todayEntry?.portions_available ?? null } };
         if (!item.photo_path) {
           return { ...withDaily, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
         }
@@ -753,12 +760,13 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
   const current = stages.findIndex((s) => s.key === order.stage);
   const next = stages[current + 1];
   const image = order.photo_url || menuImageFor(order, menuItems);
+  const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
   return (
     <article className={`card card-${order.stage}`} onClick={() => onEdit(order)}>
       <div className="card-body">
         <div className="card-top">
-          <StageBadge stage={order.stage} />
-          <button className={order.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{order.is_paid ? "Paid" : "Pending"}</button>
+          <span className="card-stage-group"><StageBadge stage={order.stage} />{order.source === "customer" && <span className="source-badge">Online</span>}</span>
+          <button className={`${order.is_paid ? "paid yes" : "paid"} ${order.payment_status === "submitted" ? "submitted" : ""}`} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{paymentLabel}</button>
         </div>
         <div className="card-summary-layout">
           <span className="order-thumb">{image ? <img src={image} alt="" /> : <ChefHat />}</span>
@@ -768,6 +776,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
           </div>
         </div>
         {order.remarks && <p className="remark">{order.remarks}</p>}
+        {order.payment_reference && <p className="payment-reference"><ReceiptText size={13} /><span>UPI reference</span><b>{order.payment_reference}</b></p>}
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
           <button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit details</button>
@@ -806,11 +815,11 @@ function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; m
     return <div className="order-row" key={o.id} onClick={() => onEdit(o)}>
       <span className="serial">{String(i + 1).padStart(2, "0")}</span>
       {image ? <img src={image} alt="" /> : <span className="row-placeholder"><ChefHat /></span>}
-      <div className="row-customer"><b>{o.customer_name} <em>· Flat {o.flat_number}</em></b><small><span>Order</span>{o.order_details}</small></div>
+      <div className="row-customer"><b>{o.customer_name} <em>· Flat {o.flat_number}</em>{o.source === "customer" && <i className="online-order-tag">Online</i>}</b><small><span>Order</span>{o.order_details}</small></div>
       <span className="row-time"><Clock3 size={14} />{o.delivery_time?.slice(0, 5) || "Not set"}</span>
       <b className="row-amount">{money(Number(o.amount))}</b>
       <StageBadge stage={o.stage} />
-      <button className={o.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : "Pending"}</button>
+      <button className={`${o.is_paid ? "paid yes" : "paid"} ${o.payment_status === "submitted" ? "submitted" : ""}`} title={o.payment_reference ? `UPI reference: ${o.payment_reference}` : undefined} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : o.payment_status === "submitted" ? "Verify" : "Pending"}</button>
     </div>;
   })}</div>;
 }
@@ -993,6 +1002,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
           <TimeField value={form.delivery_time || ""} onChange={(v) => set("delivery_time", v)} />
           <Field label="Amount (₹)" type="number" value={String(form.amount)} onChange={(v) => set("amount", Number(v))} />
           <Choice label="Delivered by" options={[["nanny", "Nanny"], ["others", "Others"]]} value={form.delivered_by} onChange={(v) => set("delivered_by", v as DeliveryBy)} />
+          {"id" in draft && draft.payment_reference && <div className="wide payment-proof"><ReceiptText size={19} /><span><small>Customer submitted UPI reference</small><b>{draft.payment_reference}</b></span></div>}
           <label className="paid-choice"><input type="checkbox" checked={form.is_paid} onChange={(e) => set("is_paid", e.target.checked)} /><span><Check size={18} /> Payment received</span></label>
           <fieldset className="wide stage-field"><legend>Order stage</legend><div className="stage-choice">{stages.map((s) => <button type="button" className={`${s.color} ${form.stage === s.key ? "selected" : ""}`} key={s.key} onClick={() => set("stage", s.key)}><i />{s.short}</button>)}</div></fieldset>
           <Field label="Remarks / special instructions" value={form.remarks} onChange={(v) => set("remarks", v)} wide textarea />
