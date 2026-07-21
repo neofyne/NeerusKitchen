@@ -17,6 +17,7 @@ import {
   ReceiptText,
   Search,
   ShoppingBag,
+  Smartphone,
   Sparkles,
   UtensilsCrossed,
   X,
@@ -136,6 +137,7 @@ export function Storefront() {
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [placedOrder, setPlacedOrder] = useState<CustomerOrder | null>(null);
   const [notice, setNotice] = useState("");
+  const [phonePreview, setPhonePreview] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -244,7 +246,11 @@ export function Storefront() {
   }
 
   return (
-    <div className="storefront">
+    <div className={`storefront-workspace ${phonePreview ? "storefront-preview" : ""}`}>
+      <button className="store-device-switch" onClick={() => setPhonePreview((current) => !current)} aria-pressed={phonePreview}>
+        <Smartphone />{phonePreview ? "Exit phone preview" : "Preview on phone"}
+      </button>
+      <div className="storefront">
       <header className="store-header">
         <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>HOME-COOKED WITH LOVE</small></span></button>
         <div className="store-header-actions">
@@ -286,6 +292,7 @@ export function Storefront() {
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
+      </div>
     </div>
   );
 }
