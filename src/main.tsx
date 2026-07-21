@@ -756,14 +756,18 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
   const image = order.photo_url || menuImageFor(order, menuItems);
   return (
     <article className={`card card-${order.stage}`} onClick={() => onEdit(order)}>
-      {image && <img className="order-photo" src={image} alt={order.order_details} />}
       <div className="card-body">
-        <div className="card-top">
-          <StageBadge stage={order.stage} />
-          <button className={order.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={15} />{order.is_paid ? "Paid" : "Pending"}</button>
+        <div className="card-summary-layout">
+          <span className="order-thumb">{image ? <img src={image} alt="" /> : <ChefHat />}</span>
+          <div className="card-summary-copy">
+            <div className="card-top">
+              <StageBadge stage={order.stage} />
+              <button className={order.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={15} />{order.is_paid ? "Paid" : "Pending"}</button>
+            </div>
+            <div className="customer-line"><div><h3>{order.customer_name}</h3><span>Flat {order.flat_number}</span></div><strong>{money(Number(order.amount))}</strong></div>
+          </div>
         </div>
-        <div className="customer-line"><div><h3>{order.customer_name}</h3><span>Flat {order.flat_number}</span></div><strong>{money(Number(order.amount))}</strong></div>
-        <p className="food">{order.order_details}</p>
+        <p className="food"><small>ORDER</small><b>{order.order_details}</b></p>
         {order.remarks && <p className="remark">{order.remarks}</p>}
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
@@ -798,7 +802,18 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate }: { 
 }
 
 function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void }) {
-  return <div className="order-list">{orders.map((o, i) => { const image = o.photo_url || menuImageFor(o, menuItems); return <div className="order-row" key={o.id} onClick={() => onEdit(o)}><span className="serial">{String(i + 1).padStart(2, "0")}</span>{image ? <img src={image} alt="" /> : <span className="row-placeholder"><ChefHat /></span>}<div className="row-customer"><b>{o.customer_name}</b><small>Flat {o.flat_number} · {o.order_details}</small></div><span className="row-time">{o.delivery_time?.slice(0, 5) || "—"}</span><b className="row-amount">{money(Number(o.amount))}</b><StageBadge stage={o.stage} /><button className={o.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : "Pending"}</button></div>; })}</div>;
+  return <div className="order-list">{orders.map((o, i) => {
+    const image = o.photo_url || menuImageFor(o, menuItems);
+    return <div className="order-row" key={o.id} onClick={() => onEdit(o)}>
+      <span className="serial">{String(i + 1).padStart(2, "0")}</span>
+      {image ? <img src={image} alt="" /> : <span className="row-placeholder"><ChefHat /></span>}
+      <div className="row-customer"><b>{o.customer_name} <em>· Flat {o.flat_number}</em></b><small><span>Order</span>{o.order_details}</small></div>
+      <span className="row-time"><Clock3 size={14} />{o.delivery_time?.slice(0, 5) || "Not set"}</span>
+      <b className="row-amount">{money(Number(o.amount))}</b>
+      <StageBadge stage={o.stage} />
+      <button className={o.is_paid ? "paid yes" : "paid"} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : "Pending"}</button>
+    </div>;
+  })}</div>;
 }
 
 function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onRemove, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onRemove: (item: MenuItem) => void; onOrder: (item: MenuItem) => void }) {
@@ -900,7 +915,7 @@ function CustomerField({ value, customers, onChange, onSelect }: { value: string
         <div className="customer-suggestions">
           <small>{query ? "Matching customers" : "Recent customers"}</small>
           {suggestions.map((profile) => (
-            <button type="button" key={profile.customer_name.toLowerCase()} onMouseDown={(event) => event.preventDefault()} onClick={() => onSelect(profile)}>
+            <button type="button" key={profile.customer_name.toLowerCase()} onMouseDown={(event) => event.preventDefault()} onClick={() => { onSelect(profile); setFocused(false); }}>
               <span><b>{profile.customer_name}</b><small>Flat {profile.flat_number}</small></span><ChevronRight size={17} />
             </button>
           ))}
