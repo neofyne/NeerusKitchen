@@ -93,8 +93,6 @@ const starterCatalog = [
   ["aloo-paratha", "Aloo paratha", 90],
   ["poha", "Poha", 80],
 ].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
-const starterFeaturedNames = new Set(starterCatalog.filter((item) => item.is_featured).map((item) => item.name));
-
 const stageLabels: Record<string, string> = {
   new: "Order placed",
   confirmed: "Confirmed",
@@ -107,7 +105,7 @@ const stageLabels: Record<string, string> = {
 const defaultSettings: StoreSettings = {
   ordering_open: true,
   hero_message: "Fresh home-style food, prepared with care and delivered to your door.",
-  upi_id: "",
+  upi_id: "krsnasolo@okicici",
   merchant_name: "Neeru's Kitchen",
   order_cutoff: null,
 };
@@ -179,7 +177,6 @@ export function Storefront() {
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
     ]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
-    const hasFeaturedSelection = Boolean(daily?.some((entry) => entry.is_featured));
     if (!menu) {
       setItems(starterCatalog);
       setLoading(false);
@@ -194,7 +191,7 @@ export function Storefront() {
         description: row.description || "Comforting home-style food, made fresh today.",
         spice_level: (row.spice_level || "mild") as Spice,
         image_url: row.photo_path ? `/api/photos?key=${encodeURIComponent(row.photo_path)}` : starterImages[row.name],
-        is_featured: Boolean(today?.is_featured) || (!hasFeaturedSelection && starterFeaturedNames.has(row.name)),
+        is_featured: Boolean(today?.is_featured),
         portions_available: today?.portions_available ?? null,
       }];
     }));
@@ -219,6 +216,9 @@ export function Storefront() {
     return items.filter((item) => !query || `${item.name} ${item.description}`.toLowerCase().includes(query));
   }, [items, search]);
   const featured = items.filter((item) => item.is_featured);
+  const heroItem = featured[0] || items[0];
+  const currentTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }).format(new Date());
+  const acceptingOrders = settings.ordering_open && (!settings.order_cutoff || currentTime <= settings.order_cutoff.slice(0, 5));
   const cartLines = items.filter((item) => cart[item.id]).map((item) => ({ ...item, quantity: cart[item.id] }));
   const cartCount = cartLines.reduce((total, item) => total + item.quantity, 0);
   const cartTotal = cartLines.reduce((total, item) => total + item.price * item.quantity, 0);
@@ -268,8 +268,8 @@ export function Storefront() {
       <main className="store-main">
         {view === "menu" && <>
           <section className="store-hero">
-            <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${settings.ordering_open ? "" : "closed"}`}><i />{settings.ordering_open ? "Taking orders today" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
-            <div className="hero-plate">{featured[0]?.image_url ? <img src={featured[0].image_url} alt={featured[0].name} /> : <UtensilsCrossed />}</div>
+            <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${acceptingOrders ? "" : "closed"}`}><i />{acceptingOrders ? "Taking orders today" : settings.ordering_open ? "Today’s order cutoff has passed" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
+            <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} /> : <UtensilsCrossed />}</div>
           </section>
 
           {featured.length > 0 && <section className="featured-section"><div className="store-section-title"><div><span className="store-eyebrow"><Flame /> KITCHEN FAVOURITES</span><h2>Featured today</h2></div></div><div className="featured-row">{featured.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} featured />)}</div></section>}
@@ -281,7 +281,7 @@ export function Storefront() {
           </section>
         </>}
 
-        {view === "cart" && <CartView lines={cartLines} total={cartTotal} orderingOpen={settings.ordering_open} onQuantity={setQuantity} onBack={() => go("menu")} onCheckout={beginCheckout} />}
+        {view === "cart" && <CartView lines={cartLines} total={cartTotal} orderingOpen={acceptingOrders} onQuantity={setQuantity} onBack={() => go("menu")} onCheckout={beginCheckout} />}
         {view === "orders" && <OrdersView orders={orders} onBack={() => go("menu")} />}
         {view === "account" && session && <AccountView session={session} profile={profile} onSaved={(next) => { setProfile(next); setNotice("Your details were saved."); }} onBack={() => go("menu")} />}
       </main>
@@ -433,7 +433,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {
   const [deliveryTime, setDeliveryTime] = useState("");
-  const [instructions, setInstructions] = useState(profile.standing_instructions || "");
+  const [instructions, setInstructions] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   async function placeOrder(event: React.FormEvent) {
@@ -443,7 +443,7 @@ function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile
     const { data: order, error: loadError } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,order_details,delivery_time").eq("id", data).single();
     setBusy(false); if (loadError) setMessage(loadError.message); else onPlaced(order as CustomerOrder);
   }
-  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div><label><span>Preferred delivery time</span><input type="time" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><label><span>Instructions for this order <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} /></label><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} items</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">You’ll receive UPI payment instructions after the order is created.</small></form></div>;
+  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div>{profile.standing_instructions && <div className="standing-instruction"><Check /><span><b>Standing instruction applied</b><small>{profile.standing_instructions}</small></span></div>}<label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label><span>Preferred delivery time</span><input type="time" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} items</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">You’ll receive UPI payment instructions after the order is created.</small></form></div>;
 }
 
 function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; settings: StoreSettings; onClose: () => void }) {

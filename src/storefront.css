@@ -195,6 +195,11 @@
 .delivery-address b { font-size: 13px; }
 .delivery-address small { margin-top: 3px; color: var(--store-muted); font-size: 10px; }
 .delivery-address button { color: #a34526; font-size: 10px; font-weight: 800; }
+.standing-instruction { display: flex; align-items: flex-start; gap: 9px; padding: 11px 12px; border: 1px solid #cfe4d6; border-radius: 11px; color: #236b49; background: #f0f8f3; }
+.standing-instruction > svg { width: 17px; height: 17px; flex: 0 0 17px; margin-top: 1px; }
+.standing-instruction b, .standing-instruction small { display: block; }
+.standing-instruction b { font-size: 10px; }
+.standing-instruction small { margin-top: 3px; color: #547261; font-size: 10px; line-height: 1.4; }
 .checkout-review { display: flex; align-items: center; justify-content: space-between; padding: 15px 0; border-top: 1px solid var(--store-line); color: var(--store-muted); font-size: 12px; }
 .checkout-review strong { color: #18231d; font-size: 22px; }
 .checkout-note { display: block; color: #879189; font-size: 9px; line-height: 1.4; text-align: center; }

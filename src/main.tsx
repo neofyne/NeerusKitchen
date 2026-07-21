@@ -1,7 +1,9 @@
 import { createRoot } from "react-dom/client";
 import { useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
+import QRCode from "qrcode";
 import {
+  Archive,
   CalendarDays,
   Camera,
   Check,
@@ -16,8 +18,10 @@ import {
   LayoutDashboard,
   List,
   Moon,
+  Pencil,
   Plus,
   ReceiptText,
+  RotateCcw,
   Search,
   Settings2,
   Smartphone,
@@ -76,6 +80,7 @@ type MenuItem = {
     is_available: boolean;
     is_featured: boolean;
     portions_available: number | null;
+    special_price: number | null;
   };
 };
 type CustomerProfile = {
@@ -126,7 +131,6 @@ const starterMenu: MenuItem[] = [
 }));
 
 const starterImage = new Map(starterMenu.map((item) => [item.name.toLowerCase(), item.photo_url]));
-const starterFeaturedNames = new Set(["Veg sandwich", "Paneer sandwich", "Masala khichdi"]);
 const today = () => {
   const local = new Date();
   local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
@@ -182,12 +186,13 @@ export function AdminApp() {
   const [editing, setEditing] = useState<Order | null>(null);
   const [adding, setAdding] = useState(false);
   const [menuAdding, setMenuAdding] = useState(false);
+  const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "", merchant_name: "Neeru's Kitchen", order_cutoff: "" });
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "" });
 
   useEffect(() => {
     if (!supabase) return;
@@ -245,17 +250,16 @@ export function AdminApp() {
   async function loadMenu() {
     if (!supabase || !session) return;
     const [{ data, error }, { data: daily }, { data: configuration }] = await Promise.all([
-      supabase.from("menu_items").select("*").eq("is_active", true).order("name"),
-      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available").eq("menu_date", today()),
+      supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
+      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", today()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
     ]);
     if (error || !data?.length) return;
     const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
-    const hasFeaturedSelection = Boolean(daily?.some((entry) => entry.is_featured));
     const resolved = await Promise.all(
       (data as MenuItem[]).map(async (item) => {
         const todayEntry = dailyMap.get(item.id);
-        const withDaily = { ...item, daily: { is_available: todayEntry?.is_available ?? true, is_featured: Boolean(todayEntry?.is_featured) || (!hasFeaturedSelection && starterFeaturedNames.has(item.name)), portions_available: todayEntry?.portions_available ?? null } };
+        const withDaily = { ...item, daily: { is_available: item.is_active && (todayEntry?.is_available ?? true), is_featured: Boolean(todayEntry?.is_featured), portions_available: todayEntry?.portions_available ?? null, special_price: todayEntry?.special_price ?? null } };
         if (!item.photo_path) {
           return { ...withDaily, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
         }
@@ -430,9 +434,9 @@ export function AdminApp() {
     setNotice(`${rows.length} orders exported. Open the file in Excel or import it into Google Sheets.`);
   }
 
-  async function saveMenuItem(name: string, price: number, photo?: File) {
+  async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) {
     if (!supabase || !session) return;
-    let photoPath: string | null = null;
+    let photoPath: string | null = existing?.photo_path ?? null;
     if (photo) {
       try {
         photoPath = await uploadPhoto(photo, "menu");
@@ -440,33 +444,56 @@ export function AdminApp() {
         return setNotice(error instanceof Error ? error.message : "Could not upload menu photo.");
       }
     }
-    const { error } = await supabase
-      .from("menu_items")
-      .insert({ name: name.trim(), price: Number(price), photo_path: photoPath });
-    if (error) setNotice(`Could not add menu item: ${error.message}`);
+    const record = { name: values.name.trim(), price: Number(values.price), description: values.description?.trim() ?? "", spice_level: values.spice_level || "mild", photo_path: photoPath, is_active: true };
+    const { error } = existing
+      ? await supabase.from("menu_items").update(record).eq("id", existing.id)
+      : await supabase.from("menu_items").insert(record);
+    if (error) setNotice(`Could not save menu item: ${error.message}`);
     else {
       setMenuAdding(false);
-      setNotice(`${name} was added to the menu.`);
+      setMenuEditing(null);
+      setNotice(`${values.name} was ${existing ? "updated" : "added to the recipe catalogue"}.`);
       loadMenu();
     }
   }
 
-  async function removeMenuItem(item: MenuItem) {
-    if (!supabase || !confirm(`Remove ${item.name} from the menu?`)) return;
-    if (starterMenu.some((starter) => starter.name === item.name)) {
-      setMenuItems((items) => items.filter((x) => x.id !== item.id));
-      return;
+  async function toggleMenuItem(item: MenuItem) {
+    if (!supabase) return;
+    const next = !item.is_active;
+    if (!next && !confirm(`Archive ${item.name}? It will disappear from the customer menu but can be restored here.`)) return;
+    const { error } = await supabase.from("menu_items").update({ is_active: next }).eq("id", item.id);
+    if (error) setNotice(`Could not update recipe: ${error.message}`);
+    else {
+      if (!next) await updateDailyMenu(item, { is_available: false, is_featured: false });
+      setNotice(next ? `${item.name} restored to the catalogue.` : `${item.name} archived.`);
+      loadMenu();
     }
-    const { error } = await supabase.from("menu_items").update({ is_active: false }).eq("id", item.id);
-    if (error) setNotice(`Could not remove menu item: ${error.message}`);
-    else loadMenu();
   }
 
   async function updateDailyMenu(item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) {
     if (!supabase) return;
-    const daily = { is_available: true, is_featured: false, portions_available: null, ...item.daily, ...changes };
+    const daily = { is_available: true, is_featured: false, portions_available: null, special_price: null, ...item.daily, ...changes };
     const { error } = await supabase.from("daily_menu").upsert({ menu_item_id: item.id, menu_date: today(), ...daily }, { onConflict: "menu_item_id,menu_date" });
     if (error) setNotice(`Could not update today's menu: ${error.message}`); else loadMenu();
+  }
+
+  async function setAllDailyMenu(isAvailable: boolean) {
+    if (!supabase) return;
+    const rows = menuItems.filter((item) => item.is_active).map((item) => ({ menu_item_id: item.id, menu_date: today(), is_available: isAvailable, is_featured: isAvailable ? Boolean(item.daily?.is_featured) : false, portions_available: item.daily?.portions_available ?? null, special_price: item.daily?.special_price ?? null }));
+    const { error } = await supabase.from("daily_menu").upsert(rows, { onConflict: "menu_item_id,menu_date" });
+    if (error) setNotice(`Could not update today's menu: ${error.message}`);
+    else { setNotice(isAvailable ? "All active recipes are shown today." : "Today's customer menu is cleared."); loadMenu(); }
+  }
+
+  async function repeatYesterdayMenu() {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", shift(today(), -1));
+    if (error) return setNotice(`Could not load yesterday's menu: ${error.message}`);
+    if (!data?.length) return setNotice("Yesterday has no saved customer menu to repeat.");
+    const rows = data.map((entry) => ({ ...entry, menu_date: today() }));
+    const result = await supabase.from("daily_menu").upsert(rows, { onConflict: "menu_item_id,menu_date" });
+    if (result.error) setNotice(`Could not repeat yesterday: ${result.error.message}`);
+    else { setNotice("Yesterday's menu, featured dishes and portions were copied to today."); loadMenu(); }
   }
 
   async function saveStoreSettings(settings: AdminStoreSettings) {
@@ -623,7 +650,7 @@ export function AdminApp() {
               )}
             </>
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onRemove={removeMenuItem} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onToggleArchive={toggleMenuItem} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
@@ -655,7 +682,7 @@ export function AdminApp() {
             onDelete={editing ? () => deleteOrder(editing.id) : undefined}
           />
         )}
-        {menuAdding && <MenuItemForm onClose={() => setMenuAdding(false)} onSave={saveMenuItem} />}
+        {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
       </div>
     </div>
   );
@@ -824,13 +851,22 @@ function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; m
   })}</div>;
 }
 
-function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onRemove, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onRemove: (item: MenuItem) => void; onOrder: (item: MenuItem) => void }) {
+function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, onToggleArchive, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
   const [form, setForm] = useState(settings);
+  const [upiQr, setUpiQr] = useState("");
   useEffect(() => setForm(settings), [settings]);
+  useEffect(() => {
+    if (!form.upi_id.trim()) return setUpiQr("");
+    const uri = `upi://pay?pa=${encodeURIComponent(form.upi_id.trim())}&pn=${encodeURIComponent(form.merchant_name || "Neeru's Kitchen")}&cu=INR&tn=${encodeURIComponent("Neeru's Kitchen payment preview")}`;
+    QRCode.toDataURL(uri, { width: 180, margin: 1, color: { dark: "#17211b", light: "#ffffff" } }).then(setUpiQr);
+  }, [form.upi_id, form.merchant_name]);
   const set = <K extends keyof AdminStoreSettings>(key: K, value: AdminStoreSettings[K]) => setForm((current) => ({ ...current, [key]: value }));
+  const activeItems = items.filter((item) => item.is_active);
+  const shownCount = activeItems.filter((item) => item.daily?.is_available).length;
+  const featuredCount = activeItems.filter((item) => item.daily?.is_available && item.daily?.is_featured).length;
   return (
     <>
-      <section className="page-heading menu-heading"><div><span className="eyebrow">KITCHEN CATALOGUE</span><h1>Food menu</h1><p>Choose what customers can order today and what appears as featured.</p></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add food item</button></section>
+      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><h1>Menu & selling</h1><p>Manage the recipe catalogue, today’s availability, featured dishes and payment instructions.</p></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add recipe</button></section>
       <section className="storefront-manager">
         <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
         <div className="manager-fields">
@@ -841,13 +877,18 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onRemove,
           <label><span>Order cutoff</span><input type="time" value={form.order_cutoff} onChange={(event) => set("order_cutoff", event.target.value)} /></label>
           <button className="primary manager-save" onClick={() => onSaveSettings(form)}><Check size={18} /> Save storefront</button>
         </div>
+        <div className="payment-preview">
+          <div className="payment-preview-copy"><span className="payment-preview-icon"><ReceiptText /></span><div><b>UPI Direct payment</b><small>After checkout, customers see an order-specific QR and submit their UPI reference. The kitchen verifies it before marking the order paid.</small><strong>{form.upi_id || "Add a UPI ID above to activate the QR"}</strong></div></div>
+          {upiQr && <div className="payment-preview-qr"><img src={upiQr} alt="UPI QR preview" /><span>QR preview</span></div>}
+        </div>
       </section>
-      <div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>Turn dishes on, feature favourites and set portions.</small></div>
+      <div className="daily-menu-toolbar"><div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>{shownCount} shown · {featuredCount} featured · {items.length - activeItems.length} archived</small></div><div className="daily-menu-actions"><button onClick={onRepeatYesterday}><RotateCcw size={14} /> Repeat yesterday</button><button onClick={onShowAll}><Check size={14} /> Show all</button><button onClick={onHideAll}><X size={14} /> Clear today</button></div></div>
       <section className="menu-grid">
-        {items.map((item) => <article className="menu-card" key={item.id}>
-          <button className="menu-image" onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>Order this</em></button>
-          <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.price ? money(item.price) : "Set price in order"}</span></div><button className="remove-food" onClick={() => onRemove(item)} aria-label={`Remove ${item.name}`}><Trash2 size={17} /></button></div>
-          <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} onClick={() => onDaily(item, { is_available: !item.daily?.is_available })}><Check size={14} /> Today</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Portions</span><input type="number" min="0" placeholder="∞" value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
+        {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} key={item.id}>
+          <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
+          <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} regular` : money(item.price)}</span></div><div className="menu-card-actions"><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
+          {item.description && <p className="menu-description">{item.description}</p>}
+          <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} disabled={!item.is_active} onClick={() => onDaily(item, { is_available: !item.daily?.is_available, is_featured: item.daily?.is_available ? false : item.daily?.is_featured })}><Check size={14} /> {item.daily?.is_available ? "Shown" : "Hidden"}</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.is_active || !item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Today’s price</span><input type="number" min="0" placeholder={String(item.price)} disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.special_price ?? ""} onChange={(event) => onDaily(item, { special_price: event.target.value === "" ? null : Number(event.target.value) })} /></label><label><span>Portions</span><input type="number" min="0" placeholder="∞" disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
       </section>
     </>
@@ -1015,12 +1056,14 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   );
 }
 
-function MenuItemForm({ onClose, onSave }: { onClose: () => void; onSave: (name: string, price: number, photo?: File) => void }) {
-  const [name, setName] = useState("");
-  const [price, setPrice] = useState(0);
+function MenuItemForm({ item, onClose, onSave }: { item: MenuItem | null; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) => void }) {
+  const [name, setName] = useState(item?.name || "");
+  const [price, setPrice] = useState(item?.price || 0);
+  const [description, setDescription] = useState(item?.description || "");
+  const [spiceLevel, setSpiceLevel] = useState<MenuItem["spice_level"]>(item?.spice_level || "mild");
   const [photo, setPhoto] = useState<File>();
-  const [preview, setPreview] = useState<string>();
-  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={(e) => { e.preventDefault(); onSave(name, price, photo); }}><div className="modal-head"><div><span className="eyebrow">MENU MANAGER</span><h2>Add food item</h2><p>Create a reusable dish for future orders.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Food name" value={name} onChange={setName} /><Field label="Default price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label className="wide photo-upload"><span><Camera size={18} /> Food photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <img src={preview} alt="Selected food" /> : <><Camera /><b>Take or choose a clear food photo</b><small>Square photos work best</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Plus size={19} /> Add to menu</button></div></form></div>;
+  const [preview, setPreview] = useState<string | undefined>(item?.photo_url);
+  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={(e) => { e.preventDefault(); onSave({ name, price, description, spice_level: spiceLevel }, photo, item || undefined); }}><div className="modal-head"><div><span className="eyebrow">RECIPE CATALOGUE</span><h2>{item ? "Edit recipe" : "Add recipe"}</h2><p>Keep reusable dish details ready for today’s storefront.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Food name" value={name} onChange={setName} /><Field label="Regular price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Food photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <img src={preview} alt="Selected food" /> : <><Camera /><b>Take or choose a clear food photo</b><small>Square photos work best</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save">{item ? <Check size={19} /> : <Plus size={19} />} {item ? "Save recipe" : "Add recipe"}</button></div></form></div>;
 }
 
 function Field({ label, value, onChange, type = "text", wide = false, textarea = false, autoFocus = false }: { label: string; value: string; onChange: (v: string) => void; type?: string; wide?: boolean; textarea?: boolean; autoFocus?: boolean }) {

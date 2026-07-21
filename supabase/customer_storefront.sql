@@ -1,6 +1,12 @@
 -- Customer storefront and strict family/customer access separation.
 -- Safe to run after supabase/schema.sql.
 
+create or replace function public.kitchen_today()
+returns date language sql stable set search_path = public
+as $$ select (timezone('Asia/Kolkata', now()))::date; $$;
+
+grant execute on function public.kitchen_today() to anon, authenticated;
+
 create table if not exists public.admin_users (
   user_id uuid primary key references auth.users(id) on delete cascade,
   created_at timestamptz not null default now()
@@ -62,7 +68,7 @@ create table if not exists public.customer_profiles (
 create table if not exists public.daily_menu (
   id uuid primary key default gen_random_uuid(),
   menu_item_id uuid not null references public.menu_items(id) on delete cascade,
-  menu_date date not null default current_date,
+  menu_date date not null default public.kitchen_today(),
   is_available boolean not null default true,
   is_featured boolean not null default false,
   portions_available integer check (portions_available is null or portions_available >= 0),
@@ -78,7 +84,7 @@ create table if not exists public.storefront_settings (
   id smallint primary key default 1 check (id = 1),
   ordering_open boolean not null default true,
   hero_message text not null default 'Fresh home-style food, prepared with care and delivered to your door.',
-  upi_id text not null default '',
+  upi_id text not null default 'krsnasolo@okicici',
   merchant_name text not null default 'Neeru''s Kitchen',
   order_cutoff time,
   updated_at timestamptz not null default now()
@@ -129,7 +135,7 @@ from auth.users
 on conflict (id) do nothing;
 
 insert into public.daily_menu (menu_item_id, menu_date, is_available, is_featured)
-select id, current_date, true, row_number() over (order by created_at) <= 3
+select id, public.kitchen_today(), true, row_number() over (order by created_at) <= 3
 from public.menu_items
 on conflict (menu_item_id, menu_date) do nothing;
 
@@ -145,6 +151,9 @@ set search_path = public, pg_temp
 as $$
 declare
   v_user uuid := auth.uid();
+  v_today date := public.kitchen_today();
+  v_local_time time := (timezone('Asia/Kolkata', now()))::time;
+  v_settings public.storefront_settings%rowtype;
   v_profile public.customer_profiles%rowtype;
   v_order_id uuid;
   v_item jsonb;
@@ -158,7 +167,9 @@ declare
 begin
   if v_user is null then raise exception 'Please sign in before ordering.'; end if;
   if jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then raise exception 'Your cart is empty.'; end if;
-  if not coalesce((select ordering_open from public.storefront_settings where id = 1), false) then raise exception 'The kitchen is not taking orders right now.'; end if;
+  select * into v_settings from public.storefront_settings where id = 1;
+  if not found or not v_settings.ordering_open then raise exception 'The kitchen is not taking orders right now.'; end if;
+  if v_settings.order_cutoff is not null and v_local_time > v_settings.order_cutoff then raise exception 'Today''s order cutoff has passed.'; end if;
 
   select * into v_profile from public.customer_profiles where id = v_user;
   if not found or trim(v_profile.full_name) = '' or trim(v_profile.flat_number) = '' then
@@ -170,7 +181,7 @@ begin
     delivery_time, amount, delivered_by, is_paid, stage, remarks,
     source, payment_status, payment_method
   ) values (
-    current_date, v_user, v_profile.full_name, v_profile.flat_number, 'Preparing order…',
+    v_today, v_user, v_profile.full_name, v_profile.flat_number, 'Preparing order…',
     p_delivery_time, 0, 'nanny', false, 'new',
     trim(concat_ws(' · ', nullif(v_profile.standing_instructions, ''), nullif(p_instructions, ''))),
     'customer', 'pending', 'upi'
@@ -186,7 +197,7 @@ begin
     if not found then raise exception 'A selected dish is no longer available.'; end if;
 
     select * into v_daily from public.daily_menu
-    where menu_item_id = v_menu.id and menu_date = current_date;
+    where menu_item_id = v_menu.id and menu_date = v_today;
     if found and not v_daily.is_available then raise exception '% is sold out.', v_menu.name; end if;
     if found and v_daily.portions_available is not null then
       update public.daily_menu
@@ -269,7 +280,7 @@ create policy "Admins read customer profiles" on public.customer_profiles
 drop policy if exists "Anyone reads today's menu" on public.daily_menu;
 drop policy if exists "Admins manage daily menu" on public.daily_menu;
 create policy "Anyone reads today's menu" on public.daily_menu
-  for select to anon, authenticated using (menu_date = current_date or public.is_admin());
+  for select to anon, authenticated using (menu_date = public.kitchen_today() or public.is_admin());
 create policy "Admins manage daily menu" on public.daily_menu
   for all to authenticated using (public.is_admin()) with check (public.is_admin());
 
