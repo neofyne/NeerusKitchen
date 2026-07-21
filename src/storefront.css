@@ -211,6 +211,9 @@
 .payment-total strong { font-size: 23px; }
 .upi-panel { display: grid; grid-template-columns: 145px 1fr; align-items: center; gap: 16px; padding: 15px; border: 1px solid #dce3dd; border-radius: 15px; text-align: left; }
 .upi-panel img { width: 145px; border-radius: 7px; }
+.payment-qr-loading { width: 145px; min-height: 145px; display: grid; align-content: center; justify-items: center; gap: 9px; border-radius: 8px; color: var(--store-muted); background: #f4f5f1; font-size: 9px; font-weight: 750; }
+.store-loader { width: 21px; height: 21px; display: block; border: 2px solid #d8ded9; border-top-color: var(--store-green); border-radius: 50%; animation: store-spin .8s linear infinite; }
+@keyframes store-spin { to { transform: rotate(360deg); } }
 .upi-panel b, .upi-panel small { display: block; }
 .upi-panel b { font-size: 14px; }
 .upi-panel small { margin: 6px 0 12px; color: var(--store-muted); font-size: 10px; line-height: 1.45; }
@@ -293,6 +296,7 @@
   .profile-form { padding: 16px; }
   .upi-panel { grid-template-columns: 112px 1fr; gap: 12px; padding: 11px; }
   .upi-panel img { width: 112px; }
+  .payment-qr-loading { width: 112px; min-height: 112px; }
 }
 
 @container storefront (max-width: 370px) {

@@ -42,7 +42,7 @@ export default async (request: Request) => {
     const form = await request.formData();
     const photo = form.get("photo");
     const purpose = form.get("purpose");
-    if (!(photo instanceof File) || (purpose !== "orders" && purpose !== "menu")) {
+    if (!(photo instanceof File) || (purpose !== "orders" && purpose !== "menu" && purpose !== "payment")) {
       return Response.json({ error: "A valid photo and purpose are required" }, { status: 400 });
     }
     if (!ALLOWED_TYPES.has(photo.type) || photo.size > MAX_PHOTO_SIZE) {
@@ -50,18 +50,18 @@ export default async (request: Request) => {
     }
 
     const extension = photo.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
-    const key = `${purpose}/${user.id}/${crypto.randomUUID()}.${extension}`;
+    const key = purpose === "payment" ? "payment/current" : `${purpose}/${user.id}/${crypto.randomUUID()}.${extension}`;
     await store.set(key, photo, {
       metadata: { contentType: photo.type, owner: user.id, createdAt: new Date().toISOString() },
-      onlyIfNew: true,
+      ...(purpose === "payment" ? {} : { onlyIfNew: true }),
     });
     return Response.json({ key });
   }
 
   if (request.method === "GET") {
     const key = new URL(request.url).searchParams.get("key");
-    const validKey = /^(orders|menu)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
-    if (!key || !validKey.test(key)) {
+    const validPhotoKey = /^(orders|menu)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
+    if (!key || (key !== "payment/current" && !validPhotoKey.test(key))) {
       return Response.json({ error: "Photo not found" }, { status: 404 });
     }
     if (key.startsWith("orders/") && !(await isFamilyAdmin(request))) {
@@ -73,13 +73,25 @@ export default async (request: Request) => {
     return new Response(entry.data, {
       headers: {
         "Content-Type": contentType,
-        "Cache-Control": "private, max-age=3600",
+        "Cache-Control": key === "payment/current" ? "no-store" : "private, max-age=3600",
         ETag: entry.etag,
       },
     });
   }
 
-  return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST" } });
+  if (request.method === "DELETE") {
+    const key = new URL(request.url).searchParams.get("key");
+    if (key !== "payment/current") {
+      return Response.json({ error: "QR code not found" }, { status: 404 });
+    }
+    if (!(await isFamilyAdmin(request))) {
+      return Response.json({ error: "Family administrator access required" }, { status: 403 });
+    }
+    await store.delete(key);
+    return Response.json({ removed: true });
+  }
+
+  return new Response("Method not allowed", { status: 405, headers: { Allow: "GET, POST, DELETE" } });
 };
 
 export const config: Config = { path: "/api/photos" };

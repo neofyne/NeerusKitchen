@@ -293,6 +293,39 @@ img { display: block; max-width: 100%; }
 .settings-icon svg { width: 21px; }
 .settings-title h2 { margin: 1px 0 4px; font-size: 18px; letter-spacing: -.02em; }
 .settings-title p, .settings-help { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.settings-form { display: grid; gap: 13px; margin-top: 20px; }
+.account-settings-form { grid-template-columns: 1fr 1fr; }
+.settings-form label { min-width: 0; }
+.settings-form label > span { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: #47544c; font-size: 11px; font-weight: 820; }
+.settings-form label > span svg { width: 14px; height: 14px; }
+.settings-form label > span small { color: var(--muted); font-size: 9px; font-weight: 700; }
+.settings-form input { width: 100%; min-height: 44px; padding: 0 11px; border: 1px solid #d9e0dc; border-radius: 10px; color: var(--ink); background: #fff; outline: 0; }
+.settings-form input:focus { border-color: #7da48d; box-shadow: 0 0 0 3px #e7f1eb; }
+.settings-form input[aria-invalid="true"] { border-color: #d87557; box-shadow: 0 0 0 3px #fff0ea; }
+.wide-setting-field, .settings-message, .settings-save { grid-column: 1 / -1; }
+.field-hint { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; line-height: 1.35; }
+.field-hint.error { color: #a64225; }
+.settings-message { margin: 0; padding: 9px 11px; border-radius: 9px; font-size: 10px; font-weight: 730; line-height: 1.45; }
+.settings-message.success { color: #1f6f49; background: #eaf7ef; }
+.settings-message.error { color: #a33d23; background: #fff0ea; }
+.settings-save { min-height: 44px; justify-content: center; }
+.settings-security-note { display: flex; align-items: flex-start; gap: 7px; margin: 14px 0 0; padding-top: 13px; border-top: 1px solid #edf0ee; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.settings-security-note svg { width: 14px; height: 14px; flex: 0 0 14px; color: #377d59; }
+.payment-settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+.qr-uploader { display: grid; grid-template-columns: 104px minmax(0, 1fr); align-items: center; gap: 14px; padding: 12px; border: 1px solid #dce4df; border-radius: 12px; background: #f8faf8; }
+.qr-preview-box { width: 104px; height: 104px; display: grid; place-items: center; overflow: hidden; padding: 5px; border: 1px solid #dce3df; border-radius: 11px; background: #fff; }
+.qr-preview-box img { width: 100%; height: 100%; object-fit: contain; border-radius: 6px; }
+.qr-preview-box > span { display: grid; justify-items: center; gap: 6px; color: #7c8981; }
+.qr-preview-box > span svg { width: 34px; height: 34px; }
+.qr-preview-box > span small { font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.qr-upload-copy { min-width: 0; }
+.qr-upload-copy b { display: block; font-size: 12px; }
+.qr-upload-copy p { margin: 5px 0 10px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.qr-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.upload-qr-button, .remove-qr-button { min-height: 33px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 10px; border: 1px solid #d7dfda; border-radius: 8px; font-size: 9px; font-weight: 820; cursor: pointer; }
+.upload-qr-button { color: #246b49; background: #edf7f1; }
+.upload-qr-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.remove-qr-button { color: #a4472d; background: #fff3ee; }
 .size-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
 .theme-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
 .size-options button, .theme-options button { min-height: 105px; display: grid; align-content: center; justify-items: start; gap: 3px; padding: 14px; border: 1px solid #dbe2de; border-radius: 12px; text-align: left; }
@@ -567,6 +600,10 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .settings-card, .settings-card.export-card { grid-column: auto; padding: 17px; border-radius: 14px; }
   .settings-title h2 { font-size: 17px; }
   .settings-icon { width: 40px; height: 40px; flex-basis: 40px; }
+  .account-settings-form, .payment-settings-fields { grid-template-columns: 1fr; }
+  .wide-setting-field, .settings-message, .settings-save { grid-column: auto; }
+  .qr-uploader { grid-template-columns: 92px minmax(0, 1fr); gap: 11px; padding: 10px; }
+  .qr-preview-box { width: 92px; height: 92px; }
   .size-options { margin-top: 16px; }
   .theme-options { margin-top: 16px; }
   .size-options button, .theme-options button { min-height: 96px; padding: 12px; }
@@ -674,6 +711,17 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dark .remove-food { color: #aab5ae; }
 .dark .remove-food:hover { color: #ff9d89; background: #38221d; }
 .dark .settings-icon { color: #ffab8c; background: #382118; }
+.dark .settings-form label > span { color: #c7d0ca; }
+.dark .settings-form input { color: var(--ink); border-color: #3a453e; background: #121914; -webkit-text-fill-color: var(--ink); }
+.dark .settings-form input:focus { border-color: #5d8b70; box-shadow: 0 0 0 3px #20372a; }
+.dark .settings-form input[aria-invalid="true"] { border-color: #a85740; box-shadow: 0 0 0 3px #382118; }
+.dark .settings-security-note { border-color: #303a34; }
+.dark .settings-message.success { color: #8ed9ad; background: #173021; }
+.dark .settings-message.error { color: #ffad91; background: #382118; }
+.dark .qr-uploader { border-color: #334139; background: #141c17; }
+.dark .qr-preview-box { border-color: #3a453e; background: #fff; }
+.dark .upload-qr-button { color: #8ed9ad; border-color: #38674d; background: #173021; }
+.dark .remove-qr-button { color: #ffad91; border-color: #71422f; background: #382118; }
 .dark .size-options button, .dark .theme-options button { color: var(--ink); border-color: #39443d; background: #121914; }
 .dark .size-options button.selected, .dark .theme-options button.selected { border-color: #d36a43; color: #ffc0a7; background: #382118; box-shadow: inset 0 0 0 1px #d36a43; }
 .dark .export-fields input, .dark .export-fields select, .dark input, .dark textarea { color-scheme: dark; color: var(--ink); border-color: #3a453e; background: #121914; -webkit-text-fill-color: var(--ink); }

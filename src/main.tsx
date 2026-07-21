@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import QRCode from "qrcode";
 import {
@@ -15,19 +15,25 @@ import {
   Download,
   FileSpreadsheet,
   IndianRupee,
+  KeyRound,
   LayoutDashboard,
   List,
+  Mail,
   Moon,
   Pencil,
   Plus,
+  QrCode,
   ReceiptText,
   RotateCcw,
+  Save,
   Search,
   Settings2,
+  ShieldCheck,
   Smartphone,
   Sun,
   Trash2,
   Type,
+  Upload,
   UtensilsCrossed,
   UsersRound,
   X,
@@ -100,6 +106,8 @@ type AdminStoreSettings = {
   merchant_name: string;
   order_cutoff: string;
 };
+type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
+type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
 
 const stages: { key: Stage; label: string; short: string; color: string }[] = [
   { key: "new", label: "New", short: "New", color: "blue" },
@@ -338,7 +346,7 @@ export function AdminApp() {
   );
   const draft = adding ? emptyDraft(selectedDate) : editing;
 
-  async function uploadPhoto(photo: File, purpose: "orders" | "menu") {
+  async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "payment") {
     if (!session) throw new Error("Please sign in again before uploading a photo.");
     const form = new FormData();
     form.append("photo", photo);
@@ -503,6 +511,60 @@ export function AdminApp() {
     else { setStoreSettings(settings); setNotice("Customer storefront settings saved."); }
   }
 
+  async function savePaymentSettings(values: PaymentSettingsUpdate, qrPhoto?: File) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const upiId = values.upi_id.trim();
+    const merchantName = values.merchant_name.trim();
+    if (!/^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(upiId)) {
+      throw new Error("Enter a valid UPI ID, for example name@bank.");
+    }
+    if (!merchantName) throw new Error("Enter the name customers should see while paying.");
+    const nextSettings = { ...storeSettings, upi_id: upiId, merchant_name: merchantName };
+    const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...nextSettings, order_cutoff: nextSettings.order_cutoff || null });
+    if (error) throw new Error(`Could not save payment settings: ${error.message}`);
+    setStoreSettings(nextSettings);
+    if (qrPhoto) {
+      try {
+        await uploadPhoto(qrPhoto, "payment");
+      } catch (error) {
+        throw new Error(`UPI details were saved, but the QR upload failed. ${error instanceof Error ? error.message : "Please try again."}`);
+      }
+    }
+  }
+
+  async function removePaymentQr() {
+    if (!session) throw new Error("Please sign in again before removing the QR code.");
+    const response = await fetch("/api/photos?key=payment/current", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not remove the payment QR code.");
+  }
+
+  async function updateAdminAccount(values: AdminAccountUpdate) {
+    if (!supabase || !session?.user.email) throw new Error("Please sign in again before changing the admin account.");
+    const email = values.email.trim().toLowerCase();
+    const emailChanged = email !== session.user.email.toLowerCase();
+    if (!email || !email.includes("@")) throw new Error("Enter a valid admin email address.");
+    if (!values.currentPassword) throw new Error("Enter the current password to confirm this change.");
+    if (!emailChanged && !values.newPassword) throw new Error("Change the email or enter a new password first.");
+    if (values.newPassword && values.newPassword.length < 8) throw new Error("The new password must contain at least 8 characters.");
+
+    const verification = await supabase.auth.signInWithPassword({ email: session.user.email, password: values.currentPassword });
+    if (verification.error) throw new Error("The current password is not correct.");
+    const changes: { email?: string; password?: string } = {};
+    if (emailChanged) changes.email = email;
+    if (values.newPassword) changes.password = values.newPassword;
+    const { error } = await supabase.auth.updateUser(changes, {
+      emailRedirectTo: `${window.location.origin}/admin`,
+    });
+    if (error) throw new Error(error.message);
+    return emailChanged
+      ? "Account updated. Supabase may send confirmation links to the old and new email addresses before the email changes."
+      : "Admin password updated successfully.";
+  }
+
   async function updateOrder(id: string, changes: Partial<Order>) {
     if (!supabase) return;
     const record = changes.is_paid === undefined
@@ -657,9 +719,14 @@ export function AdminApp() {
               dark={dark}
               selectedDate={selectedDate}
               customerCount={customers.length}
+              adminEmail={session?.user.email || ""}
+              paymentSettings={storeSettings}
               onLarge={setLarge}
               onDark={setDark}
               onExport={exportOrdersCsv}
+              onSavePayment={savePaymentSettings}
+              onRemovePaymentQr={removePaymentQr}
+              onUpdateAccount={updateAdminAccount}
               onSignOut={() => supabase?.auth.signOut()}
             />
           )}
@@ -898,16 +965,177 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, onLarge, onDark, onExport, onSignOut }: { large: boolean; dark: boolean; selectedDate: string; customerCount: number; onLarge: (large: boolean) => void; onDark: (dark: boolean) => void; onExport: (options: ExportOptions) => void; onSignOut: () => void }) {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onUpdateAccount, onSignOut }: {
+  large: boolean;
+  dark: boolean;
+  selectedDate: string;
+  customerCount: number;
+  adminEmail: string;
+  paymentSettings: AdminStoreSettings;
+  onLarge: (large: boolean) => void;
+  onDark: (dark: boolean) => void;
+  onExport: (options: ExportOptions) => void;
+  onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
+  onRemovePaymentQr: () => Promise<void>;
+  onUpdateAccount: (values: AdminAccountUpdate) => Promise<string>;
+  onSignOut: () => void;
+}) {
   const [exportOptions, setExportOptions] = useState<ExportOptions>({ from: selectedDate, to: selectedDate, payment: "all" });
+  const [paymentForm, setPaymentForm] = useState<PaymentSettingsUpdate>({ upi_id: paymentSettings.upi_id, merchant_name: paymentSettings.merchant_name });
+  const [qrFile, setQrFile] = useState<File | undefined>();
+  const [qrPreview, setQrPreview] = useState("");
+  const [savedQrAvailable, setSavedQrAvailable] = useState(false);
+  const [qrRevision, setQrRevision] = useState(() => Date.now());
+  const [paymentBusy, setPaymentBusy] = useState(false);
+  const [paymentMessage, setPaymentMessage] = useState("");
+  const [paymentError, setPaymentError] = useState(false);
+  const [accountForm, setAccountForm] = useState<AdminAccountUpdate>({ email: adminEmail, currentPassword: "", newPassword: "" });
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountMessage, setAccountMessage] = useState("");
+  const [accountError, setAccountError] = useState(false);
   const setExport = <K extends keyof ExportOptions>(key: K, value: ExportOptions[K]) =>
     setExportOptions((current) => ({ ...current, [key]: value }));
+
+  useEffect(() => {
+    setPaymentForm({ upi_id: paymentSettings.upi_id, merchant_name: paymentSettings.merchant_name });
+  }, [paymentSettings.upi_id, paymentSettings.merchant_name]);
+
+  useEffect(() => {
+    setAccountForm((current) => ({ ...current, email: adminEmail }));
+  }, [adminEmail]);
+
+  useEffect(() => {
+    let objectUrl = "";
+    if (qrFile) {
+      objectUrl = URL.createObjectURL(qrFile);
+      setQrPreview(objectUrl);
+    } else {
+      setQrPreview("");
+    }
+    return () => { if (objectUrl) URL.revokeObjectURL(objectUrl); };
+  }, [qrFile]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setSavedQrAvailable(false);
+    fetch(`/api/photos?key=payment/current&v=${qrRevision}`, { cache: "no-store", signal: controller.signal })
+      .then((response) => setSavedQrAvailable(response.ok && Boolean(response.headers.get("content-type")?.startsWith("image/"))))
+      .catch(() => setSavedQrAvailable(false));
+    return () => controller.abort();
+  }, [qrRevision]);
+
+  const upiLooksValid = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(paymentForm.upi_id.trim());
+  const savedQrUrl = `/api/photos?key=payment/current&v=${qrRevision}`;
+
+  async function savePayment(event: FormEvent) {
+    event.preventDefault();
+    setPaymentMessage("");
+    setPaymentError(false);
+    if (!upiLooksValid) {
+      setPaymentError(true);
+      return setPaymentMessage("Enter a valid UPI ID, for example name@bank.");
+    }
+    setPaymentBusy(true);
+    try {
+      await onSavePayment(paymentForm, qrFile);
+      setQrFile(undefined);
+      setQrRevision(Date.now());
+      setPaymentMessage(qrFile ? "UPI details and payment QR saved. Customers will see the new scanner at checkout." : "UPI payment details saved.");
+    } catch (error) {
+      setPaymentError(true);
+      setPaymentMessage(error instanceof Error ? error.message : "Could not save payment settings.");
+    } finally {
+      setPaymentBusy(false);
+    }
+  }
+
+  async function removeQr() {
+    if (!confirm("Remove the uploaded payment QR? Customers will still see an automatically generated QR from the UPI ID.")) return;
+    setPaymentBusy(true);
+    setPaymentMessage("");
+    setPaymentError(false);
+    try {
+      await onRemovePaymentQr();
+      setQrFile(undefined);
+      setSavedQrAvailable(false);
+      setQrRevision(Date.now());
+      setPaymentMessage("Uploaded QR removed. Automatic UPI QR is now active.");
+    } catch (error) {
+      setPaymentError(true);
+      setPaymentMessage(error instanceof Error ? error.message : "Could not remove the payment QR.");
+    } finally {
+      setPaymentBusy(false);
+    }
+  }
+
+  async function saveAccount(event: FormEvent) {
+    event.preventDefault();
+    setAccountMessage("");
+    setAccountError(false);
+    if (accountForm.newPassword !== confirmPassword) {
+      setAccountError(true);
+      return setAccountMessage("The two new-password fields do not match.");
+    }
+    setAccountBusy(true);
+    try {
+      const message = await onUpdateAccount(accountForm);
+      setAccountMessage(message);
+      setAccountForm((current) => ({ ...current, currentPassword: "", newPassword: "" }));
+      setConfirmPassword("");
+    } catch (error) {
+      setAccountError(true);
+      setAccountMessage(error instanceof Error ? error.message : "Could not update the admin account.");
+    } finally {
+      setAccountBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="page-heading settings-heading">
-        <div><span className="eyebrow">PERSONALISE YOUR DESK</span><h1>Settings</h1><p>Make the kitchen easier to read and take your records with you.</p></div>
+        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><h1>Settings</h1><p>Manage access, payments, appearance and kitchen records securely.</p></div>
       </section>
       <section className="settings-grid">
+        <article className="settings-card account-settings-card">
+          <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div><h2>Admin account</h2><p>Change the email or password for this signed-in administrator.</p></div></div>
+          <form className="settings-form account-settings-form" onSubmit={saveAccount}>
+            <label className="wide-setting-field"><span><Mail /> Admin email</span><input type="email" value={accountForm.email} onChange={(event) => setAccountForm((current) => ({ ...current, email: event.target.value }))} autoComplete="email" required /></label>
+            <label><span><KeyRound /> Current password</span><input type="password" value={accountForm.currentPassword} onChange={(event) => setAccountForm((current) => ({ ...current, currentPassword: event.target.value }))} placeholder="Required to confirm changes" autoComplete="current-password" required /></label>
+            <label><span>New password <small>Optional</small></span><input type="password" minLength={8} value={accountForm.newPassword} onChange={(event) => setAccountForm((current) => ({ ...current, newPassword: event.target.value }))} placeholder="At least 8 characters" autoComplete="new-password" /></label>
+            <label><span>Confirm new password</span><input type="password" minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Repeat the new password" autoComplete="new-password" /></label>
+            {accountMessage && <p className={`settings-message ${accountError ? "error" : "success"}`} role="status">{accountMessage}</p>}
+            <button className="primary settings-save" disabled={accountBusy}><Save size={17} /> {accountBusy ? "Updating account…" : "Update admin account"}</button>
+          </form>
+          <p className="settings-security-note"><ShieldCheck /> Email changes may need confirmation from Supabase. The account keeps its admin permission because its secure user ID does not change.</p>
+        </article>
+
+        <article className="settings-card payment-settings-card">
+          <div className="settings-title"><span className="settings-icon"><QrCode /></span><div><h2>UPI and payment QR</h2><p>Control the payment details customers receive after ordering.</p></div></div>
+          <form className="settings-form payment-settings-form" onSubmit={savePayment}>
+            <div className="payment-settings-fields">
+              <label><span>UPI ID</span><input value={paymentForm.upi_id} onChange={(event) => setPaymentForm((current) => ({ ...current, upi_id: event.target.value }))} placeholder="name@bank" inputMode="email" aria-invalid={paymentForm.upi_id.length > 0 && !upiLooksValid} required />{paymentForm.upi_id.length > 0 && !upiLooksValid && <small className="field-hint error">Use a UPI ID such as krsnasolo@okicici</small>}</label>
+              <label><span>Payee name</span><input value={paymentForm.merchant_name} onChange={(event) => setPaymentForm((current) => ({ ...current, merchant_name: event.target.value }))} placeholder="Neeru's Kitchen" required /></label>
+            </div>
+            <div className="qr-uploader">
+              <div className="qr-preview-box">
+                {(qrPreview || savedQrAvailable) ? <img src={qrPreview || savedQrUrl} alt="Current payment QR preview" /> : <span><QrCode /><small>Automatic QR</small></span>}
+              </div>
+              <div className="qr-upload-copy">
+                <b>{qrFile ? "New QR ready to save" : savedQrAvailable ? "Custom payment QR active" : "Using automatic UPI QR"}</b>
+                <p>Upload the scanner image exported from GPay, PhonePe or your banking app. JPG, PNG or WebP works best.</p>
+                <div className="qr-actions">
+                  <label className="upload-qr-button"><Upload size={16} /> {savedQrAvailable ? "Replace QR" : "Upload QR"}<input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={(event) => setQrFile(event.target.files?.[0])} /></label>
+                  {(qrFile || savedQrAvailable) && <button type="button" className="remove-qr-button" onClick={() => qrFile ? setQrFile(undefined) : removeQr()} disabled={paymentBusy}><Trash2 size={15} /> {qrFile ? "Cancel" : "Remove"}</button>}
+                </div>
+              </div>
+            </div>
+            {paymentMessage && <p className={`settings-message ${paymentError ? "error" : "success"}`} role="status">{paymentMessage}</p>}
+            <button className="primary settings-save" disabled={paymentBusy || !upiLooksValid}><Save size={17} /> {paymentBusy ? "Saving payment settings…" : "Save payment settings"}</button>
+          </form>
+          <p className="settings-security-note"><ShieldCheck /> QR files are stored in Netlify Blobs. The UPI ID remains available for tap-to-pay and as an automatic QR fallback.</p>
+        </article>
+
         <article className="settings-card">
           <div className="settings-title"><span className="settings-icon"><Type /></span><div><h2>Text size</h2><p>This choice stays saved on this phone.</p></div></div>
           <div className="size-options" role="group" aria-label="Choose text size">

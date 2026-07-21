@@ -448,15 +448,74 @@ function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile
 
 function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; settings: StoreSettings; onClose: () => void }) {
   const [qr, setQr] = useState("");
+  const [qrKind, setQrKind] = useState<"custom" | "generated" | "">("");
   const [reference, setReference] = useState("");
   const [message, setMessage] = useState("");
   const note = `Neeru order ${order.id.slice(0, 8).toUpperCase()}`;
   const paymentUri = settings.upi_id ? `upi://pay?pa=${encodeURIComponent(settings.upi_id)}&pn=${encodeURIComponent(settings.merchant_name)}&am=${Number(order.amount).toFixed(2)}&cu=INR&tn=${encodeURIComponent(note)}` : "";
-  useEffect(() => { if (paymentUri) QRCode.toDataURL(paymentUri, { width: 280, margin: 1, color: { dark: "#17211b", light: "#ffffff" } }).then(setQr); }, [paymentUri]);
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = "";
+    async function loadPaymentQr() {
+      try {
+        const response = await fetch("/api/photos?key=payment/current", { cache: "no-store" });
+        if (response.ok && response.headers.get("content-type")?.startsWith("image/")) {
+          objectUrl = URL.createObjectURL(await response.blob());
+          if (!cancelled) {
+            setQr(objectUrl);
+            setQrKind("custom");
+          }
+          return;
+        }
+      } catch {
+        // The generated order-specific QR below remains available as a fallback.
+      }
+      if (paymentUri) {
+        const generated = await QRCode.toDataURL(paymentUri, { width: 280, margin: 1, color: { dark: "#17211b", light: "#ffffff" } });
+        if (!cancelled) {
+          setQr(generated);
+          setQrKind("generated");
+        }
+      } else if (!cancelled) {
+        setQr("");
+        setQrKind("");
+      }
+    }
+    loadPaymentQr();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [paymentUri]);
   async function submitReference() {
     if (!supabase || !reference.trim()) return setMessage("Enter the UPI transaction reference after paying.");
     const { error } = await supabase.rpc("submit_payment_reference", { p_order_id: order.id, p_reference: reference.trim() });
     setMessage(error ? error.message : "Payment reference sent. The kitchen will verify it shortly.");
   }
-  return <div className="store-modal-bg"><section className="payment-sheet"><span className="payment-success"><Check /></span><span className="store-eyebrow">ORDER RECEIVED</span><h2>Thank you!</h2><p>Order <b>#{order.id.slice(0, 8).toUpperCase()}</b> has been sent to Neeru’s Kitchen.</p><div className="payment-total"><span>Amount to pay</span><strong>{formatMoney(Number(order.amount))}</strong></div>{paymentUri ? <><div className="upi-panel">{qr && <img src={qr} alt="UPI payment QR" />}<div><b>Pay with any UPI app</b><small>Scan on a computer, or tap below on your phone.</small><a href={paymentUri}>Open GPay or UPI app</a></div></div><label className="reference-field"><span>UPI transaction reference</span><div><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Enter after payment" /><button onClick={submitReference}>Submit</button></div></label></> : <div className="pay-later"><Clock3 /><span><b>Payment details coming shortly</b><small>The kitchen will confirm how to pay for this order.</small></span></div>}{message && <div className="auth-message success">{message}</div>}<button className="store-primary" onClick={onClose}>View my orders</button></section></div>;
+  return (
+    <div className="store-modal-bg">
+      <section className="payment-sheet">
+        <span className="payment-success"><Check /></span>
+        <span className="store-eyebrow">ORDER RECEIVED</span>
+        <h2>Thank you!</h2>
+        <p>Order <b>#{order.id.slice(0, 8).toUpperCase()}</b> has been sent to Neeru’s Kitchen.</p>
+        <div className="payment-total"><span>Amount to pay</span><strong>{formatMoney(Number(order.amount))}</strong></div>
+        {paymentUri ? (
+          <>
+            <div className="upi-panel">
+              {qr ? <img src={qr} alt="UPI payment QR" /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}
+              <div>
+                <b>Pay with any UPI app</b>
+                <small>{qrKind === "custom" ? "Scan Neeru’s Kitchen payment QR, or tap below to pay the exact order amount." : "Scan on a computer, or tap below on your phone."}</small>
+                <a href={paymentUri}>Open GPay or UPI app</a>
+              </div>
+            </div>
+            <label className="reference-field"><span>UPI transaction reference</span><div><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Enter after payment" /><button type="button" onClick={submitReference}>Submit</button></div></label>
+          </>
+        ) : <div className="pay-later"><Clock3 /><span><b>Payment details coming shortly</b><small>The kitchen will confirm how to pay for this order.</small></span></div>}
+        {message && <div className="auth-message success">{message}</div>}
+        <button className="store-primary" onClick={onClose}>View my orders</button>
+      </section>
+    </div>
+  );
 }
