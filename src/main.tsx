@@ -764,12 +764,68 @@ export function AdminApp() {
 
   async function createPortableBackup(): Promise<File> {
     if (!supabase) throw new Error("The shared database is not connected.");
-    const { data, error } = await supabase.rpc("create_portable_backup");
+    const client = supabase;
+    let { data, error } = await client.rpc("create_portable_backup");
     if (error) {
       if (/function .* does not exist|schema cache/i.test(error.message)) {
-        throw new Error("Backup support has not been installed in this Supabase project yet.");
+        const readAll = async (table: string, optional = false) => {
+          const rows: unknown[] = [];
+          const pageSize = 1000;
+          for (let start = 0; start < 100000; start += pageSize) {
+            const result = await client.from(table).select("*").range(start, start + pageSize - 1);
+            if (result.error) {
+              if (optional && /does not exist|schema cache|not find/i.test(result.error.message)) return [];
+              throw new Error(`Could not back up ${table.replace(/_/g, " ")}: ${result.error.message}`);
+            }
+            const page = result.data ?? [];
+            rows.push(...page);
+            if (page.length < pageSize) break;
+          }
+          return rows;
+        };
+        const [storefrontSettings, menuItems, dailyMenu, customerProfiles, restoredProfiles, allOrders, orderItems] = await Promise.all([
+          readAll("storefront_settings"),
+          readAll("menu_items"),
+          readAll("daily_menu"),
+          readAll("customer_profiles"),
+          readAll("restored_customer_profiles", true),
+          readAll("orders"),
+          readAll("order_items"),
+        ]);
+        data = {
+          format: "neerus-home-kitchen-backup",
+          version: 1,
+          created_at: new Date().toISOString(),
+          app_name: "Neeru's Home Kitchen",
+          notes: {
+            passwords_included: false,
+            photo_files_included: false,
+            photo_storage: "Netlify Blobs",
+            account_recovery: "Customers sign up with the same email or phone number to reclaim restored history.",
+          },
+          counts: {
+            orders: allOrders.length,
+            order_items: orderItems.length,
+            menu_items: menuItems.length,
+            daily_menu: dailyMenu.length,
+            customer_profiles: customerProfiles.length,
+            restored_customer_profiles: restoredProfiles.length,
+          },
+          admin_accounts: session ? [{ email: session.user.email || "", phone: session.user.phone || "" }] : [],
+          data: {
+            storefront_settings: storefrontSettings,
+            menu_items: menuItems,
+            daily_menu: dailyMenu,
+            customer_profiles: customerProfiles,
+            restored_customer_profiles: restoredProfiles,
+            orders: allOrders,
+            order_items: orderItems,
+          },
+        };
+        error = null;
+      } else {
+        throw new Error(`Could not create backup: ${error.message}`);
       }
-      throw new Error(`Could not create backup: ${error.message}`);
     }
     if (!isPortableBackup(data)) throw new Error("Supabase returned an invalid backup package.");
     const stamp = new Date(data.created_at).toISOString().replace(/[:.]/g, "-").slice(0, 19);
