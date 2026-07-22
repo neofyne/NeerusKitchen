@@ -1,9 +1,10 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { Session } from "@supabase/supabase-js";
 import QRCode from "qrcode";
 import {
   Archive,
+  Bell,
   CalendarDays,
   Camera,
   Check,
@@ -36,6 +37,8 @@ import {
   Type,
   Upload,
   UtensilsCrossed,
+  Volume2,
+  VolumeX,
   UsersRound,
   X,
 } from "lucide-react";
@@ -56,6 +59,7 @@ type Screen = "orders" | "menu" | "settings";
 
 type Order = {
   id: string;
+  created_at?: string;
   order_date: string;
   customer_name: string;
   flat_number: string;
@@ -203,6 +207,10 @@ export function AdminApp() {
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
   const [accessRequests, setAccessRequests] = useState<CustomerAccessRequest[]>([]);
+  const [notificationOrders, setNotificationOrders] = useState<Order[]>([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationBusyId, setNotificationBusyId] = useState("");
+  const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("neeru-admin-alert-sound") !== "off");
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"board" | "list">("board");
@@ -221,6 +229,9 @@ export function AdminApp() {
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Home Kitchen", order_cutoff: "", whatsapp_number: "918483000013" });
+  const knownActionIds = useRef<Set<string> | null>(null);
+  const alertAudioContext = useRef<AudioContext | null>(null);
+  const soundEnabledRef = useRef(soundEnabled);
 
   useEffect(() => {
     if (!supabase) return;
@@ -252,6 +263,50 @@ export function AdminApp() {
   useEffect(() => {
     localStorage.setItem("neeru-theme", dark ? "dark" : "light");
   }, [dark]);
+
+  function ensureAlertAudio() {
+    if (!alertAudioContext.current) alertAudioContext.current = new AudioContext();
+    if (alertAudioContext.current.state === "suspended") alertAudioContext.current.resume().catch(() => undefined);
+    return alertAudioContext.current;
+  }
+
+  function soundAlert(context = alertAudioContext.current) {
+    if (!soundEnabledRef.current || !context || context.state !== "running") return;
+    const start = context.currentTime;
+    [660, 880].forEach((frequency, index) => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      const toneStart = start + index * 0.09;
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(frequency, toneStart);
+      gain.gain.setValueAtTime(0.0001, toneStart);
+      gain.gain.exponentialRampToValueAtTime(0.055, toneStart + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, toneStart + 0.12);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start(toneStart);
+      oscillator.stop(toneStart + 0.13);
+    });
+  }
+
+  function toggleAlertSound() {
+    const next = !soundEnabledRef.current;
+    soundEnabledRef.current = next;
+    setSoundEnabled(next);
+    localStorage.setItem("neeru-admin-alert-sound", next ? "on" : "off");
+    if (next) {
+      const context = ensureAlertAudio();
+      window.setTimeout(() => soundAlert(context), 40);
+    }
+  }
+
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+    if (!soundEnabled) return;
+    const unlock = () => ensureAlertAudio();
+    window.addEventListener("pointerdown", unlock, { once: true });
+    return () => window.removeEventListener("pointerdown", unlock);
+  }, [soundEnabled]);
 
   async function loadOrders() {
     if (!supabase) return;
@@ -324,18 +379,41 @@ export function AdminApp() {
     setCustomers([...unique.values()]);
   }
 
-  async function loadAccessRequests() {
+  async function loadActionCenter(announceNew = false) {
     if (!supabase || !session) return;
-    const { data, error } = await supabase
-      .from("customer_profiles")
-      .select("id,full_name,flat_number,phone,access_status,access_requested_at,created_at")
-      .eq("access_status", "pending")
-      .order("access_requested_at", { ascending: true, nullsFirst: false });
-    if (error) {
-      if (!/access_status/i.test(error.message)) setNotice(`Could not load customer requests: ${error.message}`);
-      return;
+    const [requestResult, orderResult] = await Promise.all([
+      supabase
+        .from("customer_profiles")
+        .select("id,full_name,flat_number,phone,access_status,access_requested_at,created_at")
+        .eq("access_status", "pending")
+        .order("access_requested_at", { ascending: true, nullsFirst: false }),
+      supabase
+        .from("orders")
+        .select("*")
+        .eq("source", "customer")
+        .eq("stage", "new")
+        .order("created_at", { ascending: false })
+        .limit(30),
+    ]);
+    if (requestResult.error && !/access_status/i.test(requestResult.error.message)) {
+      setNotice(`Could not load customer requests: ${requestResult.error.message}`);
     }
-    setAccessRequests((data || []) as CustomerAccessRequest[]);
+    if (orderResult.error) {
+      setNotice(`Could not load online order alerts: ${orderResult.error.message}`);
+    }
+    const requests = (requestResult.data || []) as CustomerAccessRequest[];
+    const onlineOrders = (orderResult.data || []) as Order[];
+    const nextIds = new Set([
+      ...requests.map((request) => `signup:${request.id}`),
+      ...onlineOrders.map((order) => `order:${order.id}`),
+    ]);
+    const hasNewAction = knownActionIds.current
+      ? [...nextIds].some((id) => !knownActionIds.current?.has(id))
+      : false;
+    knownActionIds.current = nextIds;
+    setAccessRequests(requests);
+    setNotificationOrders(onlineOrders);
+    if (announceNew && hasNewAction) soundAlert();
   }
 
   useEffect(() => {
@@ -344,16 +422,21 @@ export function AdminApp() {
   useEffect(() => {
     loadMenu();
     loadCustomers();
-    loadAccessRequests();
+    loadActionCenter(false);
   }, [session]);
   useEffect(() => {
     if (!supabase || !session) return;
     const client = supabase;
     const channel = client
-      .channel("customer-access-requests")
-      .on("postgres_changes", { event: "*", schema: "public", table: "customer_profiles" }, loadAccessRequests)
+      .channel("kitchen-action-centre")
+      .on("postgres_changes", { event: "*", schema: "public", table: "customer_profiles" }, () => loadActionCenter(true))
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => loadActionCenter(true))
       .subscribe();
-    return () => { client.removeChannel(channel); };
+    const refresh = window.setInterval(() => loadActionCenter(true), 20_000);
+    return () => {
+      window.clearInterval(refresh);
+      client.removeChannel(channel);
+    };
   }, [session]);
   useEffect(() => {
     if (!supabase || !session) return;
@@ -603,7 +686,7 @@ export function AdminApp() {
     if (!supabase) throw new Error("The shared database is not connected.");
     const { error } = await supabase.rpc("review_customer_access", { p_customer_id: customerId, p_approve: approve });
     if (error) throw new Error(error.message);
-    await loadAccessRequests();
+    await loadActionCenter(false);
     setNotice(approve ? "Customer approved. They can now sign in with their mobile number and PIN." : "Customer request declined.");
   }
 
@@ -654,8 +737,28 @@ export function AdminApp() {
     setAdding(true);
   };
   const openScreen = (next: Screen) => {
+    setNotificationsOpen(false);
     setScreen(next);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const notificationCount = accessRequests.length + notificationOrders.length;
+  const reviewFromNotifications = async (request: CustomerAccessRequest, approve: boolean) => {
+    setNotificationBusyId(request.id);
+    try {
+      await reviewCustomerAccess(request.id, approve);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not review this customer request.");
+    } finally {
+      setNotificationBusyId("");
+    }
+  };
+  const openNotificationOrder = (order: Order) => {
+    setNotificationsOpen(false);
+    setAdding(false);
+    setSelectedDate(order.order_date);
+    setScreen("orders");
+    setActiveStage("new");
+    setEditing(order);
   };
 
   if (supabase && !session) return <Login dark={dark} />;
@@ -700,6 +803,23 @@ export function AdminApp() {
               </button>
             </nav>
             <div className="header-actions">
+              <AdminNotificationCenter
+                open={notificationsOpen}
+                count={notificationCount}
+                accessRequests={accessRequests}
+                orders={notificationOrders}
+                soundEnabled={soundEnabled}
+                busyId={notificationBusyId}
+                onToggle={() => {
+                  if (soundEnabled) ensureAlertAudio();
+                  setNotificationsOpen((current) => !current);
+                }}
+                onClose={() => setNotificationsOpen(false)}
+                onToggleSound={toggleAlertSound}
+                onReview={reviewFromNotifications}
+                onOpenOrder={openNotificationOrder}
+                onManageApprovals={() => { setNotificationsOpen(false); openScreen("settings"); }}
+              />
               <button className="icon-button text-size" onClick={() => openScreen("settings")} title="Open settings">
                 <Settings2 size={20} />
                 <span>Settings</span>
@@ -820,6 +940,65 @@ export function AdminApp() {
         )}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
       </div>
+    </div>
+  );
+}
+
+function AdminNotificationCenter({ open, count, accessRequests, orders, soundEnabled, busyId, onToggle, onClose, onToggleSound, onReview, onOpenOrder, onManageApprovals }: {
+  open: boolean;
+  count: number;
+  accessRequests: CustomerAccessRequest[];
+  orders: Order[];
+  soundEnabled: boolean;
+  busyId: string;
+  onToggle: () => void;
+  onClose: () => void;
+  onToggleSound: () => void;
+  onReview: (request: CustomerAccessRequest, approve: boolean) => Promise<void>;
+  onOpenOrder: (order: Order) => void;
+  onManageApprovals: () => void;
+}) {
+  return (
+    <div className="notification-center">
+      <button className={`notification-bell ${count ? "has-actions" : ""}`} onClick={onToggle} aria-expanded={open} aria-label={`${count} kitchen actions waiting`} title="Open notifications">
+        <Bell size={20} />
+        {count > 0 && <b>{count > 99 ? "99+" : count}</b>}
+      </button>
+      {open && (
+        <section className="notification-panel" aria-label="Kitchen action centre">
+          <div className="notification-panel-head">
+            <div><span>ACTION CENTRE</span><h2>{count ? `${count} waiting` : "All caught up"}</h2></div>
+            <div>
+              <button className={`notification-sound ${soundEnabled ? "active" : ""}`} onClick={onToggleSound} title={soundEnabled ? "Turn alert sound off" : "Turn alert sound on"}>{soundEnabled ? <Volume2 /> : <VolumeX />}<span>{soundEnabled ? "Sound on" : "Sound off"}</span></button>
+              <button className="notification-close" onClick={onClose} aria-label="Close notifications"><X /></button>
+            </div>
+          </div>
+          <div className="notification-scroll">
+            {!count && <div className="notification-empty"><Check /><b>Nothing needs attention</b><span>New customer signups and online orders will appear here.</span></div>}
+            {accessRequests.length > 0 && <div className="notification-group">
+              <div className="notification-group-title"><span><UsersRound /> Customer approvals</span><b>{accessRequests.length}</b></div>
+              {accessRequests.map((request) => {
+                const digits = request.phone.replace(/\D/g, "");
+                const shownPhone = digits.length === 12 && digits.startsWith("91") ? `+91 ${digits.slice(2, 7)} ${digits.slice(7)}` : request.phone;
+                return <article className="notification-item signup-notification" key={request.id}>
+                  <span className="notification-item-icon"><CircleUserRound /></span>
+                  <div><b>{request.full_name || "New customer"}</b><small>Flat {request.flat_number || "not added"} · {shownPhone || "No phone"}</small></div>
+                  <div className="notification-review-actions"><button disabled={Boolean(busyId)} onClick={() => onReview(request, true)}><Check /> Approve</button><button disabled={Boolean(busyId)} onClick={() => { if (confirm(`Decline access for ${request.full_name || shownPhone}?`)) onReview(request, false); }}><X /> Decline</button></div>
+                </article>;
+              })}
+            </div>}
+            {orders.length > 0 && <div className="notification-group">
+              <div className="notification-group-title"><span><ReceiptText /> New online orders</span><b>{orders.length}</b></div>
+              {orders.map((order) => <button className="notification-item order-notification" key={order.id} onClick={() => onOpenOrder(order)}>
+                <span className="notification-item-icon"><UtensilsCrossed /></span>
+                <span><b>{order.customer_name} · Flat {order.flat_number}</b><small>{order.order_details}</small></span>
+                <strong>{money(Number(order.amount))}<ChevronRight /></strong>
+              </button>)}
+            </div>}
+          </div>
+          <button className="notification-manage" onClick={onManageApprovals}><Settings2 /> Open approval settings</button>
+        </section>
+      )}
     </div>
   );
 }
