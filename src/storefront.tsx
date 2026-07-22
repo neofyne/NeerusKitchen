@@ -40,6 +40,16 @@ type StoreMenuItem = {
   portions_available: number | null;
   promotion_message: string;
   promotion_until: string | null;
+  category_id: string | null;
+  unit_label: string;
+};
+
+type StoreCategory = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  sort_order: number;
 };
 
 type Profile = {
@@ -90,6 +100,7 @@ const starterImages: Record<string, string> = {
   "Veg pulao": "/food/veg-pulao.jpg",
   "Curd rice": "/food/curd-rice.jpg",
   "Aloo paratha": "/food/aloo-paratha.jpg",
+  "Aloo Parantha": "/food/aloo-paratha.jpg",
   Poha: "/food/poha.jpg",
 };
 
@@ -104,7 +115,8 @@ const starterCatalog = [
   ["curd-rice", "Curd rice", 130],
   ["aloo-paratha", "Aloo paratha", 90],
   ["poha", "Poha", 80],
-].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null, promotion_message: "", promotion_until: null })) as StoreMenuItem[];
+].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null, promotion_message: "", promotion_until: null, category_id: "starter", unit_label: "portion" })) as StoreMenuItem[];
+const starterCategories: StoreCategory[] = [{ id: "starter", name: "Today’s dishes", slug: "todays-dishes", description: "Fresh home-style dishes prepared today.", sort_order: 0 }];
 const stageLabels: Record<string, string> = {
   new: "Order placed",
   delivered: "Delivered",
@@ -128,6 +140,7 @@ const localToday = () => {
 };
 
 const formatMoney = (amount: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(amount)}`;
+const slugify = (value: string) => value.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const splitFlatAddress = (value = "") => {
   const normalized = value.trim().toUpperCase();
   const match = normalized.match(/^([A-D])[-\s]?(\d+)$/);
@@ -151,9 +164,15 @@ const savedCart = (): Record<string, number> => {
 };
 export function Storefront() {
   const [sharedDishId] = useState(() => new URLSearchParams(window.location.search).get("dish") || "");
+  const [sharedCategoryPath] = useState(() => {
+    const match = window.location.pathname.match(/^\/c\/([^/]+)(?:\/([^/]+))?/);
+    const query = new URLSearchParams(window.location.search);
+    return { categorySlug: match?.[1] ? decodeURIComponent(match[1]) : query.get("category") || "", heroSlug: match?.[2] ? decodeURIComponent(match[2]) : query.get("hero") || "" };
+  });
   const [view, setView] = useState<StoreView>("menu");
   const [session, setSession] = useState<Session | null>(null);
   const [items, setItems] = useState<StoreMenuItem[]>([]);
+  const [categories, setCategories] = useState<StoreCategory[]>([]);
   const [cart, setCart] = useState<Record<string, number>>(savedCart);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
@@ -198,14 +217,16 @@ export function Storefront() {
   async function loadStore() {
     if (!supabase) return setLoading(false);
     setLoading(true);
-    const [{ data: menu }, { data: daily }, { data: configuration }] = await Promise.all([
-      supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path").eq("is_active", true).order("name"),
+    const [{ data: menu }, { data: daily }, { data: configuration }, categoryResult] = await Promise.all([
+      supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path,category_id,unit_label").eq("is_active", true).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", localToday()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
+      supabase.from("dish_categories").select("id,name,slug,description,sort_order").eq("is_active", true).order("sort_order").order("name"),
     ]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
     if (!menu) {
       setItems(starterCatalog);
+      setCategories(starterCategories);
       setLoading(false);
       return;
     }
@@ -222,8 +243,11 @@ export function Storefront() {
         portions_available: today?.portions_available ?? null,
         promotion_message: today?.promotion_message ?? "",
         promotion_until: today?.promotion_until?.slice(0, 5) ?? null,
+        category_id: row.category_id || null,
+        unit_label: row.unit_label || "portion",
       }];
     }));
+    setCategories(categoryResult.data?.length ? categoryResult.data as StoreCategory[] : starterCategories);
     if (configuration) setSettings({ ...defaultSettings, ...configuration });
     setLoading(false);
   }
@@ -251,9 +275,18 @@ export function Storefront() {
     const query = search.trim().toLowerCase();
     return items.filter((item) => !query || `${item.name} ${item.description}`.toLowerCase().includes(query));
   }, [items, search]);
+  const menuGroups = useMemo(() => {
+    const known = categories.map((category) => ({ category, items: visibleItems.filter((item) => item.category_id === category.id) })).filter((group) => group.items.length);
+    const knownIds = new Set(categories.map((category) => category.id));
+    const uncategorized = visibleItems.filter((item) => !item.category_id || !knownIds.has(item.category_id));
+    return uncategorized.length ? [...known, { category: { id: "other", name: "Other dishes", slug: "other-dishes", description: "More fresh dishes from our home kitchen.", sort_order: 999 }, items: uncategorized }] : known;
+  }, [categories, visibleItems]);
   const featured = items.filter((item) => item.is_featured);
   const heroItem = featured[0] || items[0];
   const sharedDish = items.find((item) => item.id === sharedDishId);
+  const sharedCategory = categories.find((category) => category.slug === sharedCategoryPath.categorySlug);
+  const sharedCategoryItems = sharedCategory ? items.filter((item) => item.category_id === sharedCategory.id) : [];
+  const sharedCategoryHero = sharedCategoryItems.find((item) => slugify(item.name) === sharedCategoryPath.heroSlug) || sharedCategoryItems[0];
   const currentTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }).format(new Date());
   const acceptingOrders = settings.ordering_open && (!settings.order_cutoff || currentTime <= settings.order_cutoff.slice(0, 5));
   const cartLines = items.filter((item) => cart[item.id]).map((item) => ({ ...item, quantity: cart[item.id] }));
@@ -312,6 +345,7 @@ export function Storefront() {
 
       <main className="store-main">
         {view === "menu" && <>
+          {sharedCategory && sharedCategoryHero ? <SharedCategoryMenu category={sharedCategory} items={sharedCategoryItems} hero={sharedCategoryHero} cart={cart} onQuantity={setQuantity} onCart={() => go("cart")} /> : <>
           {sharedDish && <section className="shared-dish-banner">
             <div className="shared-dish-image">{sharedDish.image_url ? <img src={sharedDish.image_url} alt={sharedDish.name} /> : <ChefHat />}</div>
             <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{sharedDish.name}</h1><p>{sharedDish.promotion_message || sharedDish.description}</p><div className="shared-dish-facts"><strong>{formatMoney(sharedDish.price)}</strong>{sharedDish.portions_available !== null && <span>{sharedDish.portions_available > 0 ? `Only ${sharedDish.portions_available} portions today` : "Sold out"}</span>}{sharedDish.promotion_until && <span>Order before {sharedDish.promotion_until}</span>}</div><button className="store-primary" disabled={sharedDish.portions_available === 0} onClick={() => { setQuantity(sharedDish.id, Math.max(1, cart[sharedDish.id] || 0)); go("cart"); }}>{sharedDish.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
@@ -326,8 +360,10 @@ export function Storefront() {
           <section className="menu-section">
             <div className="store-section-title"><div><span className="store-eyebrow">FRESHLY PREPARED</span><h2>Today’s menu</h2></div><span>{visibleItems.length} dishes</span></div>
             <div className="store-filters"><label><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search today’s vegetarian menu" /></label></div>
-            {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-grid">{visibleItems.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
+            {!search && categories.length > 1 && <div className="store-category-chips">{categories.map((category) => <a href={`#category-${category.slug}`} key={category.id}>{category.name}</a>)}</div>}
+            {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-groups">{menuGroups.map((group) => <section id={`category-${group.category.slug}`} className="store-category-section" key={group.category.id}><div className="store-category-heading"><span><b>{group.category.name}</b><small>{group.category.description}</small></span><em>{group.items.length} dish{group.items.length === 1 ? "" : "es"}</em></div><div className="store-menu-grid">{group.items.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div></section>)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
           </section>
+          </>}
         </>}
 
         {view === "cart" && <CartView lines={cartLines} total={cartTotal} orderingOpen={acceptingOrders} onQuantity={setQuantity} onBack={() => go("menu")} onCheckout={beginCheckout} />}
@@ -354,16 +390,28 @@ function StoreLogo() {
   return <span className="store-logo"><svg viewBox="0 0 48 48"><path d="M17 21c-3-3 2-5 0-9M24 21c-3-3 2-5 0-10M31 21c-3-3 2-5 0-9" /><path className="fill" d="M10.5 25.5h27c-.8 8.2-6.1 12.5-13.5 12.5s-12.7-4.3-13.5-12.5Z" /><path d="M8.5 25.5h31" /></svg></span>;
 }
 
+function SharedCategoryMenu({ category, items, hero, cart, onQuantity, onCart }: { category: StoreCategory; items: StoreMenuItem[]; hero: StoreMenuItem; cart: Record<string, number>; onQuantity: (id: string, quantity: number) => void; onCart: () => void }) {
+  const others = items.filter((item) => item.id !== hero.id);
+  const heroQuantity = cart[hero.id] || 0;
+  const addHero = () => { onQuantity(hero.id, Math.max(1, heroQuantity)); onCart(); };
+  return <section className="shared-category-page">
+    <div className="shared-category-intro"><span className="store-eyebrow"><MessageCircle /> SHARED MENU</span><h1>{category.name}</h1><p>{category.description || "Made fresh after you order, so every portion is prepared just for you."}</p></div>
+    <article className="shared-category-hero"><div className="shared-category-hero-image">{hero.image_url ? <img src={hero.image_url} alt={hero.name} /> : <ChefHat />}</div><div className="shared-category-hero-copy"><span>FEATURED DISH</span><h2>{hero.name}</h2><p>{hero.promotion_message || hero.description}</p><div><strong>{formatMoney(hero.price)}</strong><small>per {hero.unit_label}</small></div><button className="store-primary" disabled={hero.portions_available === 0} onClick={addHero}>{hero.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div></article>
+    {others.length > 0 && <div className="shared-category-list"><div className="shared-category-list-head"><b>More from {category.name}</b><span>{others.length} more dish{others.length === 1 ? "" : "es"}</span></div>{others.map((item) => { const quantity = cart[item.id] || 0; const soldOut = item.portions_available === 0; return <article key={item.id}><div className="shared-category-thumb">{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{item.description}</small><strong>{formatMoney(item.price)} / {item.unit_label}</strong></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || quantity >= 20} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="compact-add" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Sold out" : <>Add <Plus /></>}</button>}</article>; })}</div>}
+    <div className="shared-category-footer"><span>Made fresh after you order.</span><button onClick={onCart}><ShoppingBag /> View cart</button></div>
+  </section>;
+}
+
 function FoodCard({ item, quantity, onQuantity, featured = false }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; featured?: boolean }) {
   const soldOut = item.portions_available === 0;
   return <article className={`store-food-card ${featured ? "featured-card" : ""} ${soldOut ? "sold-out" : ""}`}>
     <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
-    <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><strong>{formatMoney(item.price)}</strong>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
+    <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><span className="dish-price"><strong>{formatMoney(item.price)}</strong><small>/ {item.unit_label}</small></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
   </article>;
 }
 
 function CartView({ lines, total, orderingOpen, onQuantity, onBack, onCheckout }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; orderingOpen: boolean; onQuantity: (id: string, quantity: number) => void; onBack: () => void; onCheckout: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Continue browsing</button><div className="subpage-heading"><span className="store-eyebrow">YOUR SELECTION</span><h1>Your cart</h1><p>Fresh food is prepared after your order is confirmed.</p></div>{lines.length ? <><div className="cart-lines">{lines.map((item) => <article key={item.id}><div>{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{formatMoney(item.price)} each</small></span><div className="quantity"><button onClick={() => onQuantity(item.id, item.quantity - 1)}><Minus /></button><b>{item.quantity}</b><button onClick={() => onQuantity(item.id, item.quantity + 1)}><Plus /></button></div><strong>{formatMoney(item.price * item.quantity)}</strong></article>)}</div><div className="cart-summary"><span><b>Total</b><small>Payment instructions appear after ordering</small></span><strong>{formatMoney(total)}</strong></div><button className="store-primary checkout-button" disabled={!orderingOpen} onClick={onCheckout}>{orderingOpen ? <>Continue to delivery <ChevronRight /></> : "Orders are paused today"}</button></> : <div className="store-empty"><ShoppingBag /><b>Your cart is empty</b><span>Add something delicious from today’s menu.</span><button onClick={onBack}>See today’s menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Continue browsing</button><div className="subpage-heading"><span className="store-eyebrow">YOUR SELECTION</span><h1>Your cart</h1><p>Fresh food is prepared after your order is confirmed.</p></div>{lines.length ? <><div className="cart-lines">{lines.map((item) => <article key={item.id}><div>{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{formatMoney(item.price)} / {item.unit_label}</small></span><div className="quantity"><button onClick={() => onQuantity(item.id, item.quantity - 1)}><Minus /></button><b>{item.quantity}</b><button onClick={() => onQuantity(item.id, item.quantity + 1)}><Plus /></button></div><strong>{formatMoney(item.price * item.quantity)}</strong></article>)}</div><div className="cart-summary"><span><b>Total</b><small>Payment instructions appear after ordering</small></span><strong>{formatMoney(total)}</strong></div><button className="store-primary checkout-button" disabled={!orderingOpen} onClick={onCheckout}>{orderingOpen ? <>Continue to delivery <ChevronRight /></> : "Orders are paused today"}</button></> : <div className="store-empty"><ShoppingBag /><b>Your cart is empty</b><span>Add something delicious from today’s menu.</span><button onClick={onBack}>See today’s menu</button></div>}</section>;
 }
 
 function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () => void }) {

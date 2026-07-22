@@ -25,6 +25,7 @@ import {
   List,
   Mail,
   MessageCircle,
+  Minus,
   Moon,
   Pencil,
   Plus,
@@ -40,6 +41,7 @@ import {
   Smartphone,
   Sun,
   Trash2,
+  Tags,
   Type,
   Upload,
   UtensilsCrossed,
@@ -56,6 +58,15 @@ import { supabase } from "./supabase";
 type Stage = "new" | "delivered";
 type DeliveryBy = "nanny" | "others";
 type Screen = "orders" | "menu" | "settings";
+
+type OrderLine = {
+  id?: string;
+  menu_item_id: string;
+  item_name: string;
+  unit_price: number;
+  quantity: number;
+  unit_label: string;
+};
 
 type Order = {
   id: string;
@@ -76,6 +87,7 @@ type Order = {
   payment_status?: "pending" | "submitted" | "verified" | "failed" | "refunded";
   payment_reference?: string | null;
   payment_method?: "upi" | "cash";
+  items?: OrderLine[];
 };
 type Draft = Omit<Order, "id">;
 type MenuItem = {
@@ -87,6 +99,8 @@ type MenuItem = {
   is_active: boolean;
   description?: string;
   spice_level?: "mild" | "medium" | "spicy";
+  category_id?: string | null;
+  unit_label?: string;
   daily?: {
     is_available: boolean;
     is_featured: boolean;
@@ -95,6 +109,14 @@ type MenuItem = {
     promotion_message: string;
     promotion_until: string | null;
   };
+};
+type DishCategory = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string;
+  sort_order: number;
+  is_active: boolean;
 };
 type CustomerProfile = {
   customer_name: string;
@@ -121,6 +143,7 @@ type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: S
 type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
 type OrderDeletionReason = "cancelled" | "unpaid" | "duplicate" | "mistake" | "unavailable" | "other";
 type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string };
+type CategoryPromotionValues = { heroId: string; message: string };
 type PreparedPromotion = { title: string; text: string; url: string; image?: File };
 type AdminStoreSettings = {
   ordering_open: boolean;
@@ -140,6 +163,7 @@ type PortableBackup = {
   counts: {
     orders: number;
     order_items: number;
+    dish_categories?: number;
     menu_items: number;
     daily_menu: number;
     customer_profiles: number;
@@ -150,6 +174,7 @@ type PortableBackup = {
 type PortableRestoreResult = {
   orders: number;
   order_items: number;
+  dish_categories?: number;
   menu_items: number;
   daily_menu: number;
   customers_matched: number;
@@ -299,6 +324,7 @@ const starterMenu: MenuItem[] = [
 }));
 
 const starterImage = new Map(starterMenu.map((item) => [item.name.toLowerCase(), item.photo_url]));
+starterImage.set("aloo parantha", "/food/aloo-paratha.jpg");
 const today = () => {
   const local = new Date();
   local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
@@ -350,6 +376,7 @@ export function AdminApp() {
   const [selectedDate, setSelectedDate] = useState(today());
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
+  const [dishCategories, setDishCategories] = useState<DishCategory[]>([]);
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
   const [accessRequests, setAccessRequests] = useState<CustomerAccessRequest[]>([]);
   const [notificationOrders, setNotificationOrders] = useState<Order[]>([]);
@@ -374,6 +401,9 @@ export function AdminApp() {
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
   const [promotingItem, setPromotingItem] = useState<MenuItem | null>(null);
+  const [categoryAdding, setCategoryAdding] = useState(false);
+  const [categoryEditing, setCategoryEditing] = useState<DishCategory | null>(null);
+  const [promotingCategory, setPromotingCategory] = useState<DishCategory | null>(null);
   const [appUpdateReady, setAppUpdateReady] = useState(false);
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
@@ -416,7 +446,7 @@ export function AdminApp() {
     localStorage.setItem("neeru-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !menuAdding && !menuEditing && !promotingItem && !deletingOrder && !deliveringOrder;
+  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !menuAdding && !menuEditing && !promotingItem && !categoryAdding && !categoryEditing && !promotingCategory && !deletingOrder && !deliveringOrder;
   useEffect(() => {
     if (import.meta.env.DEV) return;
     const currentAsset = Array.from(document.scripts)
@@ -504,7 +534,7 @@ export function AdminApp() {
     setLoading(true);
     const { data, error } = await supabase
       .from("orders")
-      .select("*")
+      .select("*,order_items(id,menu_item_id,item_name,unit_price,quantity,unit_label)")
       .eq("order_date", selectedDate)
       .order("delivery_time")
       .order("created_at");
@@ -513,7 +543,16 @@ export function AdminApp() {
     else {
       const resolved = await Promise.all(
         ((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map(async (rawOrder) => {
-          const order = { ...rawOrder, stage: normalizeStage(rawOrder.stage) } as Order;
+          const order = {
+            ...rawOrder,
+            stage: normalizeStage(rawOrder.stage),
+            items: ((rawOrder as typeof rawOrder & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
+              ...line,
+              unit_price: Number(line.unit_price),
+              quantity: Number(line.quantity),
+              unit_label: line.unit_label || "portion",
+            })),
+          } as Order;
           if (!order.photo_path) return order;
           return { ...order, photo_url: await getPrivatePhotoUrl(order.photo_path, session) };
         }),
@@ -524,10 +563,11 @@ export function AdminApp() {
 
   async function loadMenu() {
     if (!supabase || !session) return;
-    const [{ data, error }, { data: daily }, { data: configuration }] = await Promise.all([
+    const [{ data, error }, { data: daily }, { data: configuration }, categoryResult] = await Promise.all([
       supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", today()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
+      supabase.from("dish_categories").select("*").order("sort_order").order("name"),
     ]);
     if (error || !data?.length) return;
     const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
@@ -546,6 +586,7 @@ export function AdminApp() {
       }),
     );
     setMenuItems(resolved);
+    if (!categoryResult.error) setDishCategories((categoryResult.data || []) as DishCategory[]);
     if (configuration) setStoreSettings({ ...configuration, order_cutoff: configuration.order_cutoff?.slice(0, 5) || "" } as AdminStoreSettings);
   }
 
@@ -691,6 +732,11 @@ export function AdminApp() {
     if (!values.customer_name || !values.flat_number || !values.order_details) {
       return setNotice("Please fill customer name, flat number, and order.");
     }
+    const structuredItems = (values.items || [])
+      .filter((line) => line.menu_item_id && line.quantity > 0)
+      .map((line) => ({ ...line, quantity: Math.min(20, Math.max(1, Number(line.quantity))), unit_price: Number(line.unit_price) }));
+    const structuredDetails = structuredItems.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label && line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+    const structuredTotal = structuredItems.reduce((total, line) => total + line.unit_price * line.quantity, 0);
     let photoPath = values.photo_path;
     if (values.stage === "delivered") {
       photoPath = null;
@@ -705,9 +751,9 @@ export function AdminApp() {
       order_date: values.order_date,
       customer_name: values.customer_name.trim(),
       flat_number: values.flat_number,
-      order_details: values.order_details.trim(),
+      order_details: structuredDetails || values.order_details.trim(),
       photo_path: photoPath,
-      amount: Number(values.amount),
+      amount: structuredItems.length ? structuredTotal : Number(values.amount),
       delivery_time: values.delivery_time || null,
       delivered_by: values.delivered_by,
       is_paid: values.is_paid,
@@ -732,6 +778,22 @@ export function AdminApp() {
       setNotice(`Could not save: ${result.error?.message || "the order was not updated"}${deliveryPhotoDeleted ? ". The temporary photo was still removed safely." : ""}`);
     }
     else {
+      const orderId = result.data.id;
+      if (editing || structuredItems.length) {
+        const deletion = await supabase.from("order_items").delete().eq("order_id", orderId);
+        if (deletion.error) return setNotice(`Order details were saved, but quantities could not be updated: ${deletion.error.message}`);
+      }
+      if (structuredItems.length) {
+        const lineResult = await supabase.from("order_items").insert(structuredItems.map((line) => ({
+          order_id: orderId,
+          menu_item_id: line.menu_item_id,
+          item_name: line.item_name,
+          unit_price: line.unit_price,
+          quantity: line.quantity,
+          unit_label: line.unit_label || "portion",
+        })));
+        if (lineResult.error) return setNotice(`Order saved, but its dish quantities could not be saved: ${lineResult.error.message}`);
+      }
       if (editing?.photo_path && photoPath !== editing.photo_path && record.stage !== "delivered") {
         try {
           await deletePhotoKeys([editing.photo_path]);
@@ -814,8 +876,9 @@ export function AdminApp() {
           }
           return rows;
         };
-        const [storefrontSettings, menuItems, dailyMenu, customerProfiles, restoredProfiles, allOrders, orderItems] = await Promise.all([
+        const [storefrontSettings, categories, menuItems, dailyMenu, customerProfiles, restoredProfiles, allOrders, orderItems] = await Promise.all([
           readAll("storefront_settings"),
+          readAll("dish_categories", true),
           readAll("menu_items"),
           readAll("daily_menu"),
           readAll("customer_profiles"),
@@ -837,6 +900,7 @@ export function AdminApp() {
           counts: {
             orders: allOrders.length,
             order_items: orderItems.length,
+            dish_categories: categories.length,
             menu_items: menuItems.length,
             daily_menu: dailyMenu.length,
             customer_profiles: customerProfiles.length,
@@ -845,6 +909,7 @@ export function AdminApp() {
           admin_accounts: session ? [{ email: session.user.email || "", phone: session.user.phone || "" }] : [],
           data: {
             storefront_settings: storefrontSettings,
+            dish_categories: categories,
             menu_items: menuItems,
             daily_menu: dailyMenu,
             customer_profiles: customerProfiles,
@@ -918,7 +983,7 @@ export function AdminApp() {
         if (update.error) throw new Error(update.error.message);
       }
       await loadMenu();
-      return `${rows.length} uploaded menu photos removed. Recipe names, prices and starter images remain.`;
+      return `${rows.length} uploaded menu photos removed. Dish names, prices and starter images remain.`;
     }
 
     let query = supabase.from("orders").select("id,photo_path,stage");
@@ -947,7 +1012,7 @@ export function AdminApp() {
     return `${keys.length} order photos removed. The order records remain.`;
   }
 
-  async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) {
+  async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label">, photo?: File, existing?: MenuItem) {
     if (!supabase || !session) return;
     let photoPath: string | null = existing?.photo_path ?? null;
     if (photo) {
@@ -957,7 +1022,7 @@ export function AdminApp() {
         return setNotice(error instanceof Error ? error.message : "Could not upload menu photo.");
       }
     }
-    const record = { name: values.name.trim(), price: Number(values.price), description: values.description?.trim() ?? "", spice_level: values.spice_level || "mild", photo_path: photoPath, is_active: true };
+    const record = { name: values.name.trim(), price: Number(values.price), description: values.description?.trim() ?? "", spice_level: values.spice_level || "mild", category_id: values.category_id || null, unit_label: values.unit_label?.trim() || "portion", photo_path: photoPath, is_active: true };
     const { error } = existing
       ? await supabase.from("menu_items").update(record).eq("id", existing.id)
       : await supabase.from("menu_items").insert(record);
@@ -965,7 +1030,7 @@ export function AdminApp() {
     else {
       setMenuAdding(false);
       setMenuEditing(null);
-      setNotice(`${values.name} was ${existing ? "updated" : "added to the recipe catalogue"}.`);
+      setNotice(`${values.name} was ${existing ? "updated" : "added to the dish catalogue"}.`);
       loadMenu();
     }
   }
@@ -975,10 +1040,38 @@ export function AdminApp() {
     const next = !item.is_active;
     if (!next && !confirm(`Archive ${item.name}? It will disappear from the customer menu but can be restored here.`)) return;
     const { error } = await supabase.from("menu_items").update({ is_active: next }).eq("id", item.id);
-    if (error) setNotice(`Could not update recipe: ${error.message}`);
+    if (error) setNotice(`Could not update dish: ${error.message}`);
     else {
       if (!next) await updateDailyMenu(item, { is_available: false, is_featured: false });
       setNotice(next ? `${item.name} restored to the catalogue.` : `${item.name} archived.`);
+      loadMenu();
+    }
+  }
+
+  async function saveDishCategory(values: Pick<DishCategory, "name" | "description" | "sort_order">, existing?: DishCategory) {
+    if (!supabase) return;
+    const baseSlug = values.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `category-${Date.now()}`;
+    const record = { name: values.name.trim(), slug: existing?.slug || baseSlug, description: values.description.trim(), sort_order: Number(values.sort_order) || 0, is_active: true };
+    const { error } = existing
+      ? await supabase.from("dish_categories").update(record).eq("id", existing.id)
+      : await supabase.from("dish_categories").insert(record);
+    if (error) setNotice(`Could not save category: ${error.message}`);
+    else {
+      setCategoryAdding(false);
+      setCategoryEditing(null);
+      setNotice(`${values.name} category ${existing ? "updated" : "created"}.`);
+      loadMenu();
+    }
+  }
+
+  async function toggleDishCategory(category: DishCategory) {
+    if (!supabase) return;
+    const next = !category.is_active;
+    if (!next && !confirm(`Hide the ${category.name} category? Its dishes stay saved and can be reassigned or restored.`)) return;
+    const { error } = await supabase.from("dish_categories").update({ is_active: next }).eq("id", category.id);
+    if (error) setNotice(`Could not update category: ${error.message}`);
+    else {
+      setNotice(next ? `${category.name} restored.` : `${category.name} hidden from the storefront.`);
       loadMenu();
     }
   }
@@ -1028,12 +1121,61 @@ export function AdminApp() {
     return { title: `${item.name} from Neeru’s Home Kitchen`, text: lines.join("\n"), url, image: imageFile };
   }
 
+  async function prepareCategoryPromotion(category: DishCategory, values: CategoryPromotionValues): Promise<PreparedPromotion> {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const categoryItems = menuItems.filter((item) => item.is_active && item.category_id === category.id);
+    const hero = categoryItems.find((item) => item.id === values.heroId);
+    if (!hero) throw new Error("Choose a featured dish from this category.");
+    const dailyRows = categoryItems.map((item) => ({
+      menu_item_id: item.id,
+      menu_date: today(),
+      is_available: true,
+      is_featured: item.id === hero.id || Boolean(item.daily?.is_featured),
+      portions_available: item.daily?.portions_available ?? null,
+      special_price: item.daily?.special_price ?? null,
+      promotion_message: item.id === hero.id ? values.message.trim() : item.daily?.promotion_message || "",
+      promotion_until: item.daily?.promotion_until || null,
+    }));
+    const { error } = await supabase.from("daily_menu").upsert(dailyRows, { onConflict: "menu_item_id,menu_date" });
+    if (error) throw new Error(`Could not prepare the category menu: ${error.message}`);
+    const lines = [
+      "❤️ *Neeru’s Home Kitchen*",
+      "",
+      `*${category.name} Menu*`,
+      values.message.trim(),
+      "",
+      ...categoryItems.flatMap((item) => [
+        `*${item.name}* – ${money(Number(item.daily?.special_price ?? item.price))}${item.unit_label && item.unit_label !== "portion" ? ` / ${item.unit_label}` : ""}`,
+        item.description || "Made fresh after you order.",
+        "",
+      ]),
+      category.description || "Made fresh after you order, so every portion is prepared just for you.",
+    ].filter((line, index, all) => line !== "" || all[index - 1] !== "");
+    const heroSlug = hero.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const url = `${window.location.origin}/c/${encodeURIComponent(category.slug)}/${encodeURIComponent(heroSlug || hero.id.slice(0, 8))}`;
+    let imageFile: File | undefined;
+    if (hero.photo_url) {
+      try {
+        const response = await fetch(hero.photo_url);
+        if (response.ok) {
+          const blob = await response.blob();
+          const extension = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
+          imageFile = new File([blob], `${category.slug}-${heroSlug}.${extension}`, { type: blob.type || "image/jpeg" });
+        }
+      } catch {
+        imageFile = undefined;
+      }
+    }
+    await loadMenu();
+    return { title: `${category.name} Menu · Neeru’s Home Kitchen`, text: lines.join("\n").trim(), url, image: imageFile };
+  }
+
   async function setAllDailyMenu(isAvailable: boolean) {
     if (!supabase) return;
     const rows = menuItems.filter((item) => item.is_active).map((item) => ({ menu_item_id: item.id, menu_date: today(), is_available: isAvailable, is_featured: isAvailable ? Boolean(item.daily?.is_featured) : false, portions_available: item.daily?.portions_available ?? null, special_price: item.daily?.special_price ?? null }));
     const { error } = await supabase.from("daily_menu").upsert(rows, { onConflict: "menu_item_id,menu_date" });
     if (error) setNotice(`Could not update today's menu: ${error.message}`);
-    else { setNotice(isAvailable ? "All active recipes are shown today." : "Today's customer menu is cleared."); loadMenu(); }
+    else { setNotice(isAvailable ? "All active dishes are shown today." : "Today's customer menu is cleared."); loadMenu(); }
   }
 
   async function repeatYesterdayMenu() {
@@ -1392,7 +1534,7 @@ export function AdminApp() {
               )}
             </>
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} categories={dishCategories} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onAddCategory={() => setCategoryAdding(true)} onEditCategory={setCategoryEditing} onPromoteCategory={setPromotingCategory} onToggleCategory={toggleDishCategory} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
@@ -1437,8 +1579,10 @@ export function AdminApp() {
         )}
         {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
         {deliveringOrder && <CompleteDeliveryModal order={deliveringOrder} busy={deliveryBusy} onClose={() => { if (!deliveryBusy) setDeliveringOrder(null); }} onConfirm={() => confirmOrderDelivery(deliveringOrder)} />}
-        {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
+        {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} categories={dishCategories} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
         {promotingItem && <PromotionModal item={promotingItem} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
+        {(categoryAdding || categoryEditing) && <CategoryForm category={categoryEditing} onClose={() => { setCategoryAdding(false); setCategoryEditing(null); }} onSave={saveDishCategory} />}
+        {promotingCategory && <CategoryPromotionModal category={promotingCategory} items={menuItems.filter((item) => item.category_id === promotingCategory.id && item.is_active)} onClose={() => setPromotingCategory(null)} onPrepare={prepareCategoryPromotion} />}
       </div>
     </div>
   );
@@ -1668,7 +1812,7 @@ function OrderList({ orders, menuItems, onEdit, onUpdate, onDelete }: { orders: 
   })}</div>;
 }
 
-function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
+function MenuScreen({ items, categories, settings, onSaveSettings, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onAddCategory, onEditCategory, onPromoteCategory, onToggleCategory, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; categories: DishCategory[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onAddCategory: () => void; onEditCategory: (category: DishCategory) => void; onPromoteCategory: (category: DishCategory) => void; onToggleCategory: (category: DishCategory) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
   const [form, setForm] = useState(settings);
   const [upiQr, setUpiQr] = useState("");
   useEffect(() => setForm(settings), [settings]);
@@ -1681,9 +1825,10 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
   const activeItems = items.filter((item) => item.is_active);
   const shownCount = activeItems.filter((item) => item.daily?.is_available).length;
   const featuredCount = activeItems.filter((item) => item.daily?.is_available && item.daily?.is_featured).length;
+  const categoryName = (item: MenuItem) => categories.find((category) => category.id === item.category_id)?.name || "Other dishes";
   return (
     <>
-      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><span className="page-title-with-info"><h1>Menu & selling</h1><InfoTip label="About menu and selling">Manage the recipe catalogue, today’s availability, featured dishes and payment instructions.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add recipe</button></section>
+      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><span className="page-title-with-info"><h1>Menu & selling</h1><InfoTip label="About menu and selling">Manage dish categories, the dish catalogue, today’s availability, featured dishes and payment instructions.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add dish</button></section>
       <section className="storefront-manager">
         <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
         <div className="manager-fields">
@@ -1699,11 +1844,18 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
           {upiQr && <div className="payment-preview-qr"><img src={upiQr} alt="UPI QR preview" /><span>QR preview</span></div>}
         </div>
       </section>
+      <section className="category-manager">
+        <div className="category-manager-head"><div><span className="settings-icon"><Tags /></span><span><h2>Dish categories</h2><small>Group dishes and share a complete category menu with one featured dish.</small></span></div><button onClick={onAddCategory}><Plus /> Add category</button></div>
+        <div className="category-list">{categories.map((category) => {
+          const count = items.filter((item) => item.category_id === category.id && item.is_active).length;
+          return <article className={category.is_active ? "" : "archived"} key={category.id}><span><b>{category.name}</b><small>{count} dish{count === 1 ? "" : "es"}</small></span><div><button disabled={!category.is_active || count === 0} onClick={() => onPromoteCategory(category)} title="Share category menu on WhatsApp"><MessageCircle /></button><button onClick={() => onEditCategory(category)} title="Edit category"><Pencil /></button><button onClick={() => onToggleCategory(category)} title={category.is_active ? "Hide category" : "Restore category"}>{category.is_active ? <Archive /> : <ArchiveRestore />}</button></div></article>;
+        })}</div>
+      </section>
       <div className="daily-menu-toolbar"><div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>{shownCount} shown · {featuredCount} featured · {items.length - activeItems.length} archived</small></div><div className="daily-menu-actions"><button onClick={onRepeatYesterday}><RotateCcw size={14} /> Repeat yesterday</button><button onClick={onShowAll}><Check size={14} /> Show all</button><button onClick={onHideAll}><X size={14} /> Clear today</button></div></div>
       <section className="menu-grid">
         {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} data-menu-id={item.id} key={item.id}>
           <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
-          <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} regular` : money(item.price)}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
+          <div className="menu-copy"><div><small className="menu-category-tag">{categoryName(item)}</small><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} / ${item.unit_label || "portion"} regular` : `${money(item.price)} / ${item.unit_label || "portion"}`}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
           {item.description && <p className="menu-description">{item.description}</p>}
           <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} disabled={!item.is_active} onClick={() => onDaily(item, { is_available: !item.daily?.is_available, is_featured: item.daily?.is_available ? false : item.daily?.is_featured })}><Check size={14} /> {item.daily?.is_available ? "Shown" : "Hidden"}</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.is_active || !item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Today’s price</span><input type="number" min="0" placeholder={String(item.price)} disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.special_price ?? ""} onChange={(event) => onDaily(item, { special_price: event.target.value === "" ? null : Number(event.target.value) })} /></label><label><span>Portions</span><input type="number" min="0" placeholder="∞" disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
@@ -1885,7 +2037,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
     const prompts: Record<CleanupAction, string> = {
       "delivered-photos": "Remove every photo attached to delivered orders? The order records will stay.",
       "all-order-photos": "Remove ALL order photos? The order records will stay.",
-      "all-menu-photos": "Remove ALL manually uploaded menu photos? Recipe details stay, but uploaded food photos will be cleared.",
+      "all-menu-photos": "Remove ALL manually uploaded menu photos? Dish details stay, but uploaded food photos will be cleared.",
       "delivered-orders": "Permanently delete all delivered order history and its photos? This cannot be undone.",
       "all-orders": "Permanently delete ALL order history and order photos? This cannot be undone.",
     };
@@ -2175,7 +2327,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
           </div>
           {storageSummary?.orders && storageSummary?.menu && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <div className="storage-inline-info"><InfoTip label="About older photo sizes">Some older photos predate size tracking, so displayed bytes cover new uploads only. Photo counts still include everything.</InfoTip><span>Older sizes partly tracked</span></div>}
           <div className="cleanup-groups">
-            <section><span className="cleanup-title"><b>Photo cleanup</b><InfoTip label="About photo cleanup">Removes image files while keeping order and recipe data.</InfoTip><em>Records stay</em></span><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
+            <section><span className="cleanup-title"><b>Photo cleanup</b><InfoTip label="About photo cleanup">Removes image files while keeping order and dish data.</InfoTip><em>Records stay</em></span><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
             <section className="danger-cleanup"><span className="cleanup-title"><b>Database history</b><InfoTip label="About deleting history">Permanently deletes order records from Supabase. Export first if you need a backup.</InfoTip><em>Permanent</em></span><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-orders")}><Archive /> Delete delivered history</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-orders")}><Trash2 /> Delete all orders</button></div></section>
           </div>
           {storageMessage && <p className={`settings-message ${storageError ? "error" : "success"}`} role="status">{storageMessage}</p>}
@@ -2288,7 +2440,11 @@ function DeleteOrderModal({ order, busy, onClose, onConfirm }: { order: Order; b
 function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: { draft: Draft | Order; menuItems: MenuItem[]; customers: CustomerProfile[]; onClose: () => void; onSave: (d: Draft, photo?: File) => void; onDelete?: () => void }) {
   const prefill = !('id' in draft) ? sessionStorage.getItem("neeru-prefill") : null;
   const prefillItem = prefill ? JSON.parse(prefill) as MenuItem : null;
-  const [form, setForm] = useState<Draft>({ ...draft, order_details: prefillItem?.name || draft.order_details, amount: prefillItem?.price || draft.amount });
+  const initialOrderLines: OrderLine[] = draft.items?.length ? draft.items : prefillItem ? [{ menu_item_id: prefillItem.id, item_name: prefillItem.name, unit_price: Number(prefillItem.daily?.special_price ?? prefillItem.price), quantity: 1, unit_label: prefillItem.unit_label || "portion" }] : [];
+  const initialLineDetails = initialOrderLines.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+  const initialLineTotal = initialOrderLines.reduce((total, line) => total + Number(line.unit_price) * line.quantity, 0);
+  const [orderLines, setOrderLines] = useState<OrderLine[]>(initialOrderLines);
+  const [form, setForm] = useState<Draft>({ ...draft, items: initialOrderLines, order_details: initialLineDetails || draft.order_details, amount: initialOrderLines.length ? initialLineTotal : draft.amount });
   const [photo, setPhoto] = useState<File>();
   const [photoPreview, setPhotoPreview] = useState<string>();
   const initialFlat = splitAdminFlat(draft.flat_number);
@@ -2323,6 +2479,13 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
       ? { ...current, customer_name: name, flat_number: match.flat_number, delivered_by: match.delivered_by }
       : { ...current, customer_name: name });
   };
+  const applyOrderLines = (next: OrderLine[]) => {
+    const normalized = next.filter((line) => line.quantity > 0).map((line) => ({ ...line, quantity: Math.min(20, Math.max(1, line.quantity)) }));
+    const details = normalized.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+    const amount = normalized.reduce((total, line) => total + Number(line.unit_price) * line.quantity, 0);
+    setOrderLines(normalized);
+    setForm((current) => ({ ...current, items: normalized, order_details: details, amount }));
+  };
   const selectCustomer = (profile: CustomerProfile) => {
     setCustomerFlat(profile.flat_number);
     setForm((current) => ({
@@ -2333,8 +2496,9 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
     }));
   };
   const selectFood = (item: MenuItem) => {
-    set("order_details", form.order_details ? `${form.order_details}, ${item.name}` : item.name);
-    if (!form.amount && item.price) set("amount", item.price);
+    const existing = orderLines.find((line) => line.menu_item_id === item.id);
+    if (existing) return applyOrderLines(orderLines.map((line) => line.menu_item_id === item.id ? { ...line, quantity: line.quantity + 1 } : line));
+    applyOrderLines([...orderLines, { menu_item_id: item.id, item_name: item.name, unit_price: Number(item.daily?.special_price ?? item.price), quantity: 1, unit_label: item.unit_label || "portion" }]);
   };
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -2347,8 +2511,9 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
             <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
             {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
           </div>
-          <div className="wide food-picker"><label>Choose food</label><div className="food-options">{menuItems.map((item) => <button type="button" key={item.id} className={form.order_details.toLowerCase().includes(item.name.toLowerCase()) ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? money(item.price) : ""}</small></button>)}</div></div>
-          <Field label="Order details" value={form.order_details} onChange={(v) => set("order_details", v)} wide />
+          <div className="wide food-picker"><label>Choose dishes</label><div className="food-options">{menuItems.filter((item) => item.is_active).map((item) => { const selected = orderLines.find((line) => line.menu_item_id === item.id); return <button type="button" key={item.id} className={selected ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? `${money(Number(item.daily?.special_price ?? item.price))} / ${item.unit_label || "portion"}` : ""}</small>{selected && <em>{selected.quantity}×</em>}</button>; })}</div></div>
+          <div className="wide admin-order-lines"><span className="admin-order-lines-title">Dish quantities</span>{orderLines.length ? orderLines.map((line) => <article key={line.menu_item_id}><span><b>{line.item_name}</b><small>{money(line.unit_price)} / {line.unit_label}</small></span><div className="admin-line-quantity"><button type="button" aria-label={`Decrease ${line.item_name} quantity`} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity - 1 } : entry))}><Minus /></button><b>{line.quantity}</b><button type="button" aria-label={`Increase ${line.item_name} quantity`} disabled={line.quantity >= 20} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity + 1 } : entry))}><Plus /></button></div><strong>{money(line.unit_price * line.quantity)}</strong><button type="button" aria-label={`Remove ${line.item_name}`} className="remove-order-line" onClick={() => applyOrderLines(orderLines.filter((entry) => entry.menu_item_id !== line.menu_item_id))}><X /></button></article>) : <p>Tap a dish above to add it, then set the quantity here.</p>}</div>
+          <Field label="Order summary" value={form.order_details} onChange={(v) => set("order_details", v)} wide />
           <TimeField value={form.delivery_time || ""} onChange={(v) => set("delivery_time", v)} />
           <Field label="Amount (₹)" type="number" value={String(form.amount)} onChange={(v) => set("amount", Number(v))} />
           <Choice label="Delivered by" options={[["nanny", "Nanny"], ["others", "Others"]]} value={form.delivered_by} onChange={(v) => set("delivered_by", v as DeliveryBy)} />
@@ -2431,14 +2596,61 @@ function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose:
   </section></div>;
 }
 
-function MenuItemForm({ item, onClose, onSave }: { item: MenuItem | null; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) => void }) {
+function CategoryForm({ category, onClose, onSave }: { category: DishCategory | null; onClose: () => void; onSave: (values: Pick<DishCategory, "name" | "description" | "sort_order">, existing?: DishCategory) => void }) {
+  const [name, setName] = useState(category?.name || "");
+  const [description, setDescription] = useState(category?.description || "");
+  const [sortOrder, setSortOrder] = useState(category?.sort_order || 0);
+  return <div className="modal-bg"><form className="modal category-modal" onSubmit={(event) => { event.preventDefault(); onSave({ name, description, sort_order: sortOrder }, category || undefined); }}>
+    <div className="modal-head"><div><span className="eyebrow">DISH CATEGORIES</span><h2>{category ? "Edit category" : "New category"}</h2><p>Use categories for menu sections and complete WhatsApp promotions.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
+    <div className="form-grid"><Field label="Category name" value={name} onChange={setName} autoFocus /><Field label="Display order" value={String(sortOrder)} onChange={(value) => setSortOrder(Number(value))} type="number" /><Field label="Category note" value={description} onChange={setDescription} wide textarea /></div>
+    <div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check /> {category ? "Save category" : "Create category"}</button></div>
+  </form></div>;
+}
+
+function CategoryPromotionModal({ category, items, onClose, onPrepare }: { category: DishCategory; items: MenuItem[]; onClose: () => void; onPrepare: (category: DishCategory, values: CategoryPromotionValues) => Promise<PreparedPromotion> }) {
+  const [heroId, setHeroId] = useState(items[0]?.id || "");
+  const [message, setMessage] = useState(category.description || "Made fresh after you order, so every portion is prepared just for you.");
+  const [prepared, setPrepared] = useState<PreparedPromotion | null>(null);
+  const [feedback, setFeedback] = useState("");
+  const [error, setError] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const hero = items.find((item) => item.id === heroId);
+  async function prepare() {
+    setBusy(true); setError(false); setFeedback("");
+    try {
+      const result = await onPrepare(category, { heroId, message });
+      setPrepared(result);
+      setFeedback("Category menu is ready. The chosen dish will lead the shared page and the other dishes will appear as compact rows.");
+    } catch (reason) {
+      setError(true); setFeedback(reason instanceof Error ? reason.message : "Could not prepare this category menu.");
+    } finally { setBusy(false); }
+  }
+  async function share() {
+    if (!prepared) return;
+    try { setError(false); setFeedback(await sharePromotion(prepared)); }
+    catch (reason) { if (reason instanceof DOMException && reason.name === "AbortError") return; setError(true); setFeedback(reason instanceof Error ? reason.message : "Could not open the share sheet."); }
+  }
+  return <div className="modal-bg"><section className="modal category-promotion-modal">
+    <div className="modal-head"><div><span className="eyebrow">SHARE CATEGORY MENU</span><h2>{category.name}</h2><p>Choose the large featured dish. Every other dish stays compact and easy to scan.</p></div><button className="icon-button" onClick={onClose}><X /></button></div>
+    {hero && <div className="promotion-preview">{hero.photo_url ? <img src={hero.photo_url} alt={hero.name} /> : <span><ChefHat /></span>}<div><small>FEATURED DISH</small><b>{hero.name}</b><strong>{money(Number(hero.daily?.special_price ?? hero.price))} / {hero.unit_label || "portion"}</strong></div></div>}
+    <label className="category-promotion-message"><span>Menu introduction</span><textarea value={message} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} /></label>
+    <div className="category-hero-list">{items.map((item) => <button type="button" className={item.id === heroId ? "selected" : ""} onClick={() => { setHeroId(item.id); setPrepared(null); }} key={item.id}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<span><b>{item.name}</b><small>{money(Number(item.daily?.special_price ?? item.price))} / {item.unit_label || "portion"}</small></span><i /></button>)}</div>
+    {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
+    {prepared && <a className="promotion-ready-link" href={prepared.url} target="_blank" rel="noreferrer"><ExternalLink /> Preview shared category</a>}
+    <div className="modal-actions"><button className="cancel" onClick={onClose}>Close</button><span />{prepared ? <button className="save whatsapp-share-button" onClick={share}><MessageCircle /> Share category</button> : <button className="save" disabled={busy || !heroId || !message.trim()} onClick={prepare}><Check /> {busy ? "Preparing…" : "Prepare category"}</button>}</div>
+  </section></div>;
+}
+
+function MenuItemForm({ item, categories, onClose, onSave }: { item: MenuItem | null; categories: DishCategory[]; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label">, photo?: File, existing?: MenuItem) => void }) {
   const [name, setName] = useState(item?.name || "");
   const [price, setPrice] = useState(item?.price || 0);
   const [description, setDescription] = useState(item?.description || "");
   const [spiceLevel, setSpiceLevel] = useState<MenuItem["spice_level"]>(item?.spice_level || "mild");
+  const [categoryId, setCategoryId] = useState(item?.category_id || categories.find((category) => category.slug === "other-dishes")?.id || categories[0]?.id || "");
+  const [unitLabel, setUnitLabel] = useState(item?.unit_label || "portion");
   const [photo, setPhoto] = useState<File>();
   const [preview, setPreview] = useState<string | undefined>(item?.photo_url);
-  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={(e) => { e.preventDefault(); onSave({ name, price, description, spice_level: spiceLevel }, photo, item || undefined); }}><div className="modal-head"><div><span className="eyebrow">RECIPE CATALOGUE</span><h2>{item ? "Edit recipe" : "Add recipe"}</h2><p>Keep reusable dish details ready for today’s storefront.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Food name" value={name} onChange={setName} /><Field label="Regular price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Food photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <img src={preview} alt="Selected food" /> : <><Camera /><b>Take or choose a clear food photo</b><small>Square photos work best</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save">{item ? <Check size={19} /> : <Plus size={19} />} {item ? "Save recipe" : "Add recipe"}</button></div></form></div>;
+  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={(e) => { e.preventDefault(); onSave({ name, price, description, spice_level: spiceLevel, category_id: categoryId || null, unit_label: unitLabel }, photo, item || undefined); }}><div className="modal-head"><div><span className="eyebrow">DISH CATALOGUE</span><h2>{item ? "Edit dish" : "Add dish"}</h2><p>Save the category, selling unit and customer-facing dish details.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Dish name" value={name} onChange={setName} /><Field label="Price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label><span>Category</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} required><option value="" disabled>Choose category</option>{categories.filter((category) => category.is_active || category.id === item?.category_id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><Field label="Selling unit" value={unitLabel} onChange={setUnitLabel} /><div className="wide field-hint"><Info size={15} /><span>Examples: <b>2 pcs</b>, <b>plate</b>, <b>bowl</b> or <b>500 g</b>. The entered price applies to one of these units.</span></div><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Dish photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <img src={preview} alt="Selected dish" /> : <><Camera /><b>Take or choose a clear dish photo</b><small>Square photos work best</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save">{item ? <Check size={19} /> : <Plus size={19} />} {item ? "Save dish" : "Add dish"}</button></div></form></div>;
 }
 
 function Field({ label, value, onChange, type = "text", wide = false, textarea = false, autoFocus = false }: { label: string; value: string; onChange: (v: string) => void; type?: string; wide?: boolean; textarea?: boolean; autoFocus?: boolean }) {

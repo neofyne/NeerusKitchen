@@ -12,6 +12,7 @@ const migrations = [
   "instant_customer_access.sql",
   "customer_contact.sql",
   "dish_promotions.sql",
+  "dish_categories_and_units.sql",
   "two_state_orders.sql",
   "delivered_photo_guard.sql",
   "admin_action_centre.sql",
@@ -41,4 +42,3 @@ const header = `-- Neeru's Home Kitchen — complete setup for a NEW Supabase pr
 
 await mkdir(join(root, "public"), { recursive: true });
 await writeFile(join(root, "public", "supabase-new-project-setup.sql"), `${header}${sections.join("")}\n`, "utf8");
-

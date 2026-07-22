@@ -129,6 +129,7 @@ begin
     'counts', jsonb_build_object(
       'orders', (select count(*) from public.orders),
       'order_items', (select count(*) from public.order_items),
+      'dish_categories', (select count(*) from public.dish_categories),
       'menu_items', (select count(*) from public.menu_items),
       'daily_menu', (select count(*) from public.daily_menu),
       'customer_profiles', (select count(*) from public.customer_profiles),
@@ -141,6 +142,7 @@ begin
     ), '[]'::jsonb),
     'data', jsonb_build_object(
       'storefront_settings', coalesce((select jsonb_agg(to_jsonb(row_value)) from public.storefront_settings row_value), '[]'::jsonb),
+      'dish_categories', coalesce((select jsonb_agg(to_jsonb(row_value) order by row_value.sort_order, row_value.name) from public.dish_categories row_value), '[]'::jsonb),
       'menu_items', coalesce((select jsonb_agg(to_jsonb(row_value) order by row_value.created_at, row_value.id) from public.menu_items row_value), '[]'::jsonb),
       'daily_menu', coalesce((select jsonb_agg(to_jsonb(row_value) order by row_value.menu_date, row_value.menu_item_id) from public.daily_menu row_value), '[]'::jsonb),
       'customer_profiles', coalesce((select jsonb_agg(to_jsonb(row_value) order by row_value.created_at, row_value.id) from public.customer_profiles row_value), '[]'::jsonb),
@@ -202,6 +204,7 @@ begin
   delete from public.orders;
   delete from public.daily_menu;
   delete from public.menu_items;
+  delete from public.dish_categories;
   delete from public.restored_customer_profiles;
 
   insert into public.restored_customer_profiles (
@@ -303,16 +306,36 @@ begin
     end if;
   end loop;
 
+  insert into public.dish_categories (
+    id, name, slug, description, sort_order, is_active, created_at, updated_at
+  )
+  select
+    item.id, item.name, item.slug, coalesce(item.description, ''),
+    coalesce(item.sort_order, 0), coalesce(item.is_active, true),
+    coalesce(item.created_at, now()), coalesce(item.updated_at, now())
+  from jsonb_to_recordset(coalesce(v_data -> 'dish_categories', '[]'::jsonb)) as item(
+    id uuid, name text, slug text, description text, sort_order integer,
+    is_active boolean, created_at timestamptz, updated_at timestamptz
+  );
+
+  insert into public.dish_categories (name, slug, description, sort_order)
+  values ('Other dishes', 'other-dishes', 'Fresh home-style dishes from Neeru''s kitchen.', 999)
+  on conflict (slug) do nothing;
+
   insert into public.menu_items (
-    id, name, price, photo_path, is_active, created_at, description, spice_level
+    id, name, price, photo_path, is_active, created_at, description, spice_level,
+    category_id, unit_label
   )
   select
     item.id, item.name, coalesce(item.price, 0), item.photo_path,
     coalesce(item.is_active, true), coalesce(item.created_at, now()),
-    coalesce(item.description, ''), coalesce(item.spice_level, 'mild')
+    coalesce(item.description, ''), coalesce(item.spice_level, 'mild'),
+    coalesce(item.category_id, (select id from public.dish_categories where slug = 'other-dishes')),
+    coalesce(item.unit_label, 'portion')
   from jsonb_to_recordset(v_data -> 'menu_items') as item(
     id uuid, name text, price numeric, photo_path text, is_active boolean,
-    created_at timestamptz, description text, spice_level text
+    created_at timestamptz, description text, spice_level text,
+    category_id uuid, unit_label text
   );
 
   insert into public.daily_menu (
@@ -395,20 +418,21 @@ begin
     on restored.legacy_id = coalesce(item.legacy_customer_id, item.customer_id);
 
   insert into public.order_items (
-    id, order_id, menu_item_id, item_name, unit_price, quantity, created_at
+    id, order_id, menu_item_id, item_name, unit_price, quantity, unit_label, created_at
   )
   select
     item.id, item.order_id, item.menu_item_id, item.item_name,
-    coalesce(item.unit_price, 0), item.quantity, coalesce(item.created_at, now())
+    coalesce(item.unit_price, 0), item.quantity, coalesce(item.unit_label, 'portion'), coalesce(item.created_at, now())
   from jsonb_to_recordset(coalesce(v_data -> 'order_items', '[]'::jsonb)) as item(
     id uuid, order_id uuid, menu_item_id uuid, item_name text,
-    unit_price numeric, quantity integer, created_at timestamptz
+    unit_price numeric, quantity integer, unit_label text, created_at timestamptz
   );
 
   return jsonb_build_object(
     'restored_at', now(),
     'orders', (select count(*) from public.orders),
     'order_items', (select count(*) from public.order_items),
+    'dish_categories', (select count(*) from public.dish_categories),
     'menu_items', (select count(*) from public.menu_items),
     'daily_menu', (select count(*) from public.daily_menu),
     'customers_matched', v_matched,
