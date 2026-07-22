@@ -134,11 +134,19 @@ const normalizeIndianPhone = (value: string) => {
   if (digits.length === 12 && digits.startsWith("91") && /^[6-9]/.test(digits.slice(2))) return `+${digits}`;
   return "";
 };
+const savedCart = (): Record<string, number> => {
+  try {
+    const value = JSON.parse(localStorage.getItem("neeru-cart") || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+};
 export function Storefront() {
   const [view, setView] = useState<StoreView>("menu");
   const [session, setSession] = useState<Session | null>(null);
   const [items, setItems] = useState<StoreMenuItem[]>([]);
-  const [cart, setCart] = useState<Record<string, number>>(() => JSON.parse(localStorage.getItem("neeru-cart") || "{}"));
+  const [cart, setCart] = useState<Record<string, number>>(savedCart);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [settings, setSettings] = useState<StoreSettings>(defaultSettings);
