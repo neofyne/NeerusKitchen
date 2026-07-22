@@ -95,6 +95,15 @@ type CustomerProfile = {
   flat_number: string;
   delivered_by: DeliveryBy;
 };
+type CustomerAccessRequest = {
+  id: string;
+  full_name: string;
+  flat_number: string;
+  phone: string;
+  access_status: "pending" | "approved" | "rejected";
+  access_requested_at: string | null;
+  created_at: string;
+};
 type ExportOptions = {
   from: string;
   to: string;
@@ -185,6 +194,7 @@ export function AdminApp() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
+  const [accessRequests, setAccessRequests] = useState<CustomerAccessRequest[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"board" | "list">("board");
@@ -306,12 +316,36 @@ export function AdminApp() {
     setCustomers([...unique.values()]);
   }
 
+  async function loadAccessRequests() {
+    if (!supabase || !session) return;
+    const { data, error } = await supabase
+      .from("customer_profiles")
+      .select("id,full_name,flat_number,phone,access_status,access_requested_at,created_at")
+      .eq("access_status", "pending")
+      .order("access_requested_at", { ascending: true, nullsFirst: false });
+    if (error) {
+      if (!/access_status/i.test(error.message)) setNotice(`Could not load customer requests: ${error.message}`);
+      return;
+    }
+    setAccessRequests((data || []) as CustomerAccessRequest[]);
+  }
+
   useEffect(() => {
     loadOrders();
   }, [selectedDate, session]);
   useEffect(() => {
     loadMenu();
     loadCustomers();
+    loadAccessRequests();
+  }, [session]);
+  useEffect(() => {
+    if (!supabase || !session) return;
+    const client = supabase;
+    const channel = client
+      .channel("customer-access-requests")
+      .on("postgres_changes", { event: "*", schema: "public", table: "customer_profiles" }, loadAccessRequests)
+      .subscribe();
+    return () => { client.removeChannel(channel); };
   }, [session]);
   useEffect(() => {
     if (!supabase || !session) return;
@@ -557,6 +591,14 @@ export function AdminApp() {
     setStoreSettings(nextSettings);
   }
 
+  async function reviewCustomerAccess(customerId: string, approve: boolean) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const { error } = await supabase.rpc("review_customer_access", { p_customer_id: customerId, p_approve: approve });
+    if (error) throw new Error(error.message);
+    await loadAccessRequests();
+    setNotice(approve ? "Customer approved. They can now sign in with their mobile number and PIN." : "Customer request declined.");
+  }
+
   async function updateAdminAccount(values: AdminAccountUpdate) {
     if (!supabase || !session?.user.email) throw new Error("Please sign in again before changing the admin account.");
     const email = values.email.trim().toLowerCase();
@@ -734,6 +776,7 @@ export function AdminApp() {
               dark={dark}
               selectedDate={selectedDate}
               customerCount={customers.length}
+              accessRequests={accessRequests}
               adminEmail={session?.user.email || ""}
               paymentSettings={storeSettings}
               whatsappNumber={storeSettings.whatsapp_number}
@@ -743,6 +786,7 @@ export function AdminApp() {
               onSavePayment={savePaymentSettings}
               onRemovePaymentQr={removePaymentQr}
               onSaveCustomerContact={saveCustomerContact}
+              onReviewCustomerAccess={reviewCustomerAccess}
               onUpdateAccount={updateAdminAccount}
               onSignOut={() => supabase?.auth.signOut()}
             />
@@ -982,11 +1026,12 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, accessRequests, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onReviewCustomerAccess, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
   customerCount: number;
+  accessRequests: CustomerAccessRequest[];
   adminEmail: string;
   paymentSettings: AdminStoreSettings;
   whatsappNumber: string;
@@ -996,6 +1041,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
   onRemovePaymentQr: () => Promise<void>;
   onSaveCustomerContact: (whatsappNumber: string) => Promise<void>;
+  onReviewCustomerAccess: (customerId: string, approve: boolean) => Promise<void>;
   onUpdateAccount: (values: AdminAccountUpdate) => Promise<string>;
   onSignOut: () => void;
 }) {
@@ -1017,6 +1063,9 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   const [contactBusy, setContactBusy] = useState(false);
   const [contactMessage, setContactMessage] = useState("");
   const [contactError, setContactError] = useState(false);
+  const [reviewingId, setReviewingId] = useState("");
+  const [accessMessage, setAccessMessage] = useState("");
+  const [accessError, setAccessError] = useState(false);
   const setExport = <K extends keyof ExportOptions>(key: K, value: ExportOptions[K]) =>
     setExportOptions((current) => ({ ...current, [key]: value }));
 
@@ -1134,12 +1183,41 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
     }
   }
 
+  async function reviewAccess(request: CustomerAccessRequest, approve: boolean) {
+    if (!approve && !confirm(`Decline access for ${request.full_name || request.phone}?`)) return;
+    setReviewingId(request.id);
+    setAccessMessage("");
+    setAccessError(false);
+    try {
+      await onReviewCustomerAccess(request.id, approve);
+      setAccessMessage(approve ? `${request.full_name || "Customer"} can now sign in.` : "Access request declined.");
+    } catch (error) {
+      setAccessError(true);
+      setAccessMessage(error instanceof Error ? error.message : "Could not review this request.");
+    } finally {
+      setReviewingId("");
+    }
+  }
+
   return (
     <>
       <section className="page-heading settings-heading">
         <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><h1>Settings</h1><p>Manage access, payments, appearance and kitchen records securely.</p></div>
       </section>
       <section className="settings-grid">
+        <article className="settings-card access-requests-card">
+          <div className="settings-title"><span className="settings-icon"><UsersRound /></span><div><h2>Customer access requests</h2><p>Approve known residents before they can sign in and place orders.</p></div><b className="request-count">{accessRequests.length}</b></div>
+          {accessRequests.length ? <div className="access-request-list">{accessRequests.map((request) => {
+            const digits = request.phone.replace(/\D/g, "");
+            const shownPhone = digits.length === 12 && digits.startsWith("91") ? `+91 ${digits.slice(2, 7)} ${digits.slice(7)}` : request.phone;
+            return <div className="access-request" key={request.id}>
+              <span><b>{request.full_name || "Unnamed customer"}</b><small>Flat {request.flat_number || "not added"} · {shownPhone || "No phone"}</small></span>
+              <div><button type="button" className="approve-access" disabled={Boolean(reviewingId)} onClick={() => reviewAccess(request, true)}><Check /> Approve</button><button type="button" className="reject-access" disabled={Boolean(reviewingId)} onClick={() => reviewAccess(request, false)}><X /> Decline</button></div>
+            </div>;
+          })}</div> : <p className="access-empty"><Check /> No customer requests are waiting.</p>}
+          {accessMessage && <p className={`settings-message ${accessError ? "error" : "success"}`} role="status">{accessMessage}</p>}
+        </article>
+
         <article className="settings-card account-settings-card">
           <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div><h2>Admin account</h2><p>Change the email or password for this signed-in administrator.</p></div></div>
           <form className="settings-form account-settings-form" onSubmit={saveAccount}>

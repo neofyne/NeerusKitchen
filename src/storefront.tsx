@@ -48,6 +48,7 @@ type Profile = {
   phone: string;
   spice_preference: Spice;
   standing_instructions: string;
+  access_status: "pending" | "approved" | "rejected";
 };
 
 type CustomerOrder = {
@@ -133,7 +134,6 @@ const normalizeIndianPhone = (value: string) => {
   if (digits.length === 12 && digits.startsWith("91") && /^[6-9]/.test(digits.slice(2))) return `+${digits}`;
   return "";
 };
-
 export function Storefront() {
   const [view, setView] = useState<StoreView>("menu");
   const [session, setSession] = useState<Session | null>(null);
@@ -212,7 +212,14 @@ export function Storefront() {
   async function loadProfile() {
     if (!supabase || !session) return;
     const { data } = await supabase.from("customer_profiles").select("*").eq("id", session.user.id).maybeSingle();
-    if (data) setProfile(data as Profile);
+    if (!data) return;
+    const next = data as Profile;
+    if (next.access_status !== "approved") {
+      setNotice(next.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Kitchen." : "Your account is waiting for kitchen approval.");
+      await supabase.auth.signOut();
+      return;
+    }
+    setProfile(next);
   }
 
   async function loadOrders() {
@@ -233,6 +240,9 @@ export function Storefront() {
   const cartCount = cartLines.reduce((total, item) => total + item.quantity, 0);
   const cartTotal = cartLines.reduce((total, item) => total + item.price * item.quantity, 0);
   const whatsappNumber = settings.whatsapp_number?.replace(/\D/g, "") || "";
+  const whatsappDisplay = whatsappNumber.length === 12 && whatsappNumber.startsWith("91")
+    ? `+91 ${whatsappNumber.slice(2, 7)} ${whatsappNumber.slice(7)}`
+    : whatsappNumber ? `+${whatsappNumber}` : "";
   const whatsappHref = whatsappNumber
     ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hi Neeru's Kitchen, I have a question about today's menu or my order.")}`
     : "";
@@ -268,6 +278,7 @@ export function Storefront() {
       <header className="store-header">
         <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
         <div className="store-header-actions">
+          {whatsappHref && <a className="store-contact-link" href={whatsappHref} target="_blank" rel="noreferrer" aria-label={`Contact Neeru's Kitchen on WhatsApp ${whatsappDisplay}`}><MessageCircle /><span>Contact</span></a>}
           <a className="family-link" href="/admin">Family desk</a>
           <button className={`header-cart-button ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")} aria-label={cartCount ? `Cart, ${cartCount} items, ${formatMoney(cartTotal)}` : "Cart, empty"}>
             <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
@@ -309,7 +320,7 @@ export function Storefront() {
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
-      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp +${whatsappNumber}`}><MessageCircle /><span><b>Need help?</b><small>Message us on WhatsApp</small></span></a>}
+      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>Need help?</b><small>{whatsappDisplay}</small></span></a>}
       </div>
     </div>
   );
@@ -339,10 +350,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
   const [mode, setMode] = useState<"login" | "register">("register");
   const [method, setMethod] = useState<"phone" | "email">("phone");
   const [phone, setPhone] = useState("");
-  const [verifiedPhone, setVerifiedPhone] = useState("");
-  const [otp, setOtp] = useState("");
-  const [otpSent, setOtpSent] = useState(false);
-  const [resendIn, setResendIn] = useState(0);
+  const [pin, setPin] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
@@ -352,12 +360,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [messageIsSuccess, setMessageIsSuccess] = useState(false);
-
-  useEffect(() => {
-    if (resendIn <= 0) return;
-    const timer = window.setInterval(() => setResendIn((current) => Math.max(0, current - 1)), 1000);
-    return () => window.clearInterval(timer);
-  }, [resendIn]);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
 
   function updateFlat(value: string) {
     if (/\D/.test(value)) {
@@ -369,128 +372,135 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
     setFlat(value);
   }
 
-  async function requestPhoneCode() {
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
     if (!supabase) return;
     setMessage("");
     setMessageIsSuccess(false);
-    if (mode === "register" && (!wing || !flat)) {
+    setAwaitingConfirmation(false);
+    if (mode === "register" && (!name.trim() || !wing || !flat)) {
       if (!flat) setFlatWarning("Please enter your flat number using numbers only.");
-      setMessage(!wing ? "Please choose your building wing." : "Please enter your flat number.");
+      setMessage(!name.trim() ? "Please enter your name." : !wing ? "Please choose your building wing." : "Please enter your flat number.");
       return;
     }
-    const formattedPhone = normalizeIndianPhone(phone);
-    if (!formattedPhone) {
-      setMessage("Enter a valid 10-digit Indian mobile number.");
-      return;
-    }
-    setBusy(true);
-    const options = mode === "register"
-      ? { shouldCreateUser: true, data: { full_name: name.trim(), flat_number: flatAddress(wing, flat), phone: formattedPhone } }
-      : { shouldCreateUser: false };
-    const { error } = await supabase.auth.signInWithOtp({ phone: formattedPhone, options });
-    setBusy(false);
-    if (error) {
-      if (/unsupported phone provider|phone provider is disabled/i.test(error.message)) {
-        return setMessage("Phone sign-in is not active yet. Please use your existing email login for now.");
-      }
-      if (mode === "login" && /signups not allowed|user not found/i.test(error.message)) {
-        return setMessage("We could not find this mobile number. Choose New customer to create an account.");
-      }
-      return setMessage(error.message);
-    }
-    setVerifiedPhone(formattedPhone);
-    setOtpSent(true);
-    setOtp("");
-    setResendIn(60);
-    setMessageIsSuccess(true);
-    setMessage(`A 6-digit code was sent to +91 ${formattedPhone.slice(-10, -5)} ${formattedPhone.slice(-5)}.`);
-  }
 
-  async function verifyPhoneCode() {
-    if (!supabase || !verifiedPhone) return;
-    if (!/^\d{6}$/.test(otp)) {
-      setMessageIsSuccess(false);
-      setMessage("Enter the complete 6-digit code.");
+    if (method === "phone") {
+      const formattedPhone = normalizeIndianPhone(phone);
+      if (!formattedPhone) return setMessage("Enter a valid 10-digit Indian mobile number.");
+      if (!/^\d{6}$/.test(pin)) return setMessage("Choose or enter your complete 6-digit PIN.");
+      setBusy(true);
+      if (mode === "login") {
+        const { data, error } = await supabase.auth.signInWithPassword({ phone: formattedPhone, password: pin });
+        if (error) {
+          setBusy(false);
+          return setMessage("That mobile number or PIN is not correct.");
+        }
+        const { data: access, error: accessError } = await supabase.from("customer_profiles").select("access_status").eq("id", data.user.id).single();
+        if (accessError || access?.access_status !== "approved") {
+          await supabase.auth.signOut();
+          setBusy(false);
+          return setMessage(access?.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Kitchen." : "Your request is waiting for kitchen approval. Please try again after the family confirms it.");
+        }
+        setBusy(false);
+        onSuccess();
+        return;
+      }
+
+      const { data, error } = await supabase.auth.signUp({
+        phone: formattedPhone,
+        password: pin,
+        options: { data: { full_name: name.trim(), flat_number: flatAddress(wing, flat), phone: formattedPhone, login_method: "phone_pin" } },
+      });
+      if (data.session) await supabase.auth.signOut();
+      setBusy(false);
+      if (error) {
+        if (/already|exists|registered/i.test(error.message)) return setMessage("This mobile number already has an account. Choose Returning customer and sign in with your PIN.");
+        return setMessage(error.message);
+      }
+      setMessageIsSuccess(true);
+      setMessage("Request sent to Neeru’s Kitchen. A family admin will approve your account, then you can sign in with this number and PIN.");
       return;
     }
+
     setBusy(true);
-    setMessage("");
-    const { data, error } = await supabase.auth.verifyOtp({ phone: verifiedPhone, token: otp, type: "sms" });
+    if (mode === "login") {
+      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      setBusy(false);
+      if (error) setMessage("That email or password is not correct."); else onSuccess();
+      return;
+    }
+    const { data, error } = await supabase.auth.signUp({
+      email: email.trim(),
+      password,
+      options: { emailRedirectTo: window.location.origin, data: { full_name: name.trim(), flat_number: flatAddress(wing, flat) } },
+    });
     setBusy(false);
-    if (error || !data.session) {
-      setMessageIsSuccess(false);
-      setMessage(error?.message || "That code could not be verified. Please try again.");
+    if (error) return setMessage(error.message);
+    if (!data.session) {
+      setAwaitingConfirmation(true);
+      setMessageIsSuccess(true);
+      setMessage(`A confirmation link was sent to ${email.trim()}.`);
       return;
     }
     onSuccess();
   }
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    if (!supabase) return;
-    if (method === "phone") {
-      if (otpSent) await verifyPhoneCode();
-      else await requestPhoneCode();
-      return;
-    }
+  async function resendConfirmation() {
+    if (!supabase || !email.trim()) return;
     setBusy(true);
     setMessage("");
-    setMessageIsSuccess(false);
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+    const { error } = await supabase.auth.resend({ type: "signup", email: email.trim(), options: { emailRedirectTo: window.location.origin } });
     setBusy(false);
-    if (error) setMessage("That email or password is not correct."); else onSuccess();
+    setMessageIsSuccess(!error);
+    setMessage(error ? error.message : `A new confirmation link was sent to ${email.trim()}.`);
   }
 
   function switchMode(next: "login" | "register") {
     setMode(next);
-    setMethod("phone");
-    setOtpSent(false);
-    setVerifiedPhone("");
-    setOtp("");
     setMessage("");
     setMessageIsSuccess(false);
+    setAwaitingConfirmation(false);
   }
 
   return <div className="store-modal-bg"><section className="auth-sheet">
     <button className="sheet-close" onClick={onClose}><X /></button>
     <StoreLogo />
     <span className="store-eyebrow">WELCOME TO NEERU’S</span>
-    <h2>{otpSent ? "Enter your code" : mode === "register" ? "Create your account" : "Welcome back"}</h2>
-    <p>{otpSent ? "We use this one-time code to verify your mobile number securely." : mode === "register" ? "One quick verification, then ordering stays fast." : "Sign in to order and follow your meals."}</p>
+    <h2>{mode === "register" ? "Request an account" : "Welcome back"}</h2>
+    <p>{mode === "register" ? "Use your mobile number or email. Phone accounts are approved by the kitchen." : "Sign in to order and follow your meals."}</p>
     <div className="auth-tabs">
       <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>New customer</button>
       <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>Returning customer</button>
     </div>
     <form onSubmit={submit}>
+      {mode === "register" && <>
+        <label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>
+        <div className="flat-address-fields">
+          <label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label>
+          <label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label>
+        </div>
+      </>}
       {method === "phone" ? <>
-        {!otpSent && mode === "register" && <>
-          <label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>
-          <div className="flat-address-fields">
-            <label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label>
-            <label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label>
-          </div>
-        </>}
-        {!otpSent ? <label><span>Mobile number</span><div className="phone-field"><b>+91</b><input type="tel" inputMode="numeric" autoComplete="tel-national" value={phone} onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" required /></div></label> : <>
-          <div className="otp-destination"><span>Code sent to</span><b>+91 {verifiedPhone.slice(-10, -5)} {verifiedPhone.slice(-5)}</b><button type="button" onClick={() => { setOtpSent(false); setMessage(""); }}>Change</button></div>
-          <label><span>6-digit verification code</span><input className="otp-input" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="• • • • • •" autoFocus required /></label>
-        </>}
+        <label><span>Mobile number</span><div className="phone-field"><b>+91</b><input type="tel" inputMode="numeric" autoComplete="tel-national" value={phone} onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" required /></div></label>
+        <label><span>{mode === "register" ? "Create a 6-digit login PIN" : "Your 6-digit PIN"}</span><input className="otp-input" type="password" inputMode="numeric" autoComplete={mode === "register" ? "new-password" : "current-password"} pattern="[0-9]{6}" maxLength={6} value={pin} onChange={(event) => setPin(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="• • • • • •" required /></label>
       </> : <>
         <label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>
-        <label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
+        <label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "register" ? "new-password" : "current-password"} required /></label>
       </>}
       {message && <div className={`auth-message ${messageIsSuccess ? "success" : ""}`}>{message}</div>}
-      <button className="store-primary" disabled={busy}>{busy ? "Please wait…" : method === "email" ? "Sign in with email" : otpSent ? "Verify and continue" : "Send verification code"}</button>
-      {method === "phone" && otpSent && <button className="resend-confirmation" type="button" disabled={busy || resendIn > 0} onClick={requestPhoneCode}>{resendIn > 0 ? `Send another code in ${resendIn}s` : "Send another code"}</button>}
+      <button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? method === "phone" ? "Send request to kitchen" : "Create email account" : method === "phone" ? "Sign in with mobile" : "Sign in with email"}</button>
+      {method === "email" && awaitingConfirmation && <button className="resend-confirmation" type="button" disabled={busy} onClick={resendConfirmation}>Resend confirmation email</button>}
     </form>
-    <button className="auth-method-switch" type="button" onClick={() => { setMethod(method === "phone" ? "email" : "phone"); setMode("login"); setOtpSent(false); setMessage(""); }}>{method === "phone" ? "Have an older email account? Sign in with email" : "Use mobile number and OTP instead"}</button>
-    <small>Your verified session is saved securely on this phone until you sign out.</small>
+    <button className="auth-method-switch" type="button" onClick={() => { setMethod(method === "phone" ? "email" : "phone"); setMessage(""); setAwaitingConfirmation(false); }}>{method === "phone" ? "Use email and password instead" : "Use mobile number and PIN instead"}</button>
+    <small>{method === "phone" ? "No SMS charge: the kitchen approves new phone accounts. Your PIN is private and should not be shared." : "Email accounts use Supabase confirmation and remain available as an alternative."}</small>
   </section></div>;
 }
 
 function AccountView({ session, profile, onSaved, onBack }: { session: Session; profile: Profile | null; onSaved: (profile: Profile) => void; onBack: () => void }) {
+  const isPhoneAccount = Boolean(session.user.phone && !session.user.email);
   const defaultProfile = profile
     ? { ...profile, email: profile.email || session.user.email || "", phone: profile.phone || session.user.phone || "" }
-    : { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: session.user.phone || "", spice_preference: "mild" as Spice, standing_instructions: "" };
+    : { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: session.user.phone || "", spice_preference: "mild" as Spice, standing_instructions: "", access_status: "approved" as const };
   const initialAddress = splitFlatAddress(defaultProfile.flat_number);
   const [form, setForm] = useState<Profile>(defaultProfile);
   const [wing, setWing] = useState<Wing>(initialAddress.wing);
@@ -528,10 +538,10 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
     }
     setBusy(true);
     const next = { ...form, flat_number: flatAddress(wing, flat) };
-    const { error } = await supabase.from("customer_profiles").upsert(next);
+    const { error } = await supabase.from("customer_profiles").upsert({ id: next.id, full_name: next.full_name, flat_number: next.flat_number, email: next.email, phone: next.phone, spice_preference: next.spice_preference, standing_instructions: next.standing_instructions });
     setBusy(false); if (error) setMessage(error.message); else onSaved(next);
   }
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && !isPhoneAccount && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{isPhoneAccount ? "Mobile login" : session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={isPhoneAccount || Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {
@@ -554,8 +564,18 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
   const [qrKind, setQrKind] = useState<"custom" | "generated" | "">("");
   const [reference, setReference] = useState("");
   const [message, setMessage] = useState("");
+  const [copyMessage, setCopyMessage] = useState("");
   const note = `Neeru order ${order.id.slice(0, 8).toUpperCase()}`;
-  const paymentUri = settings.upi_id ? `upi://pay?pa=${encodeURIComponent(settings.upi_id)}&pn=${encodeURIComponent(settings.merchant_name)}&am=${Number(order.amount).toFixed(2)}&cu=INR&tn=${encodeURIComponent(note)}` : "";
+  const paymentQuery = settings.upi_id ? new URLSearchParams({ pa: settings.upi_id, pn: settings.merchant_name, am: Number(order.amount).toFixed(2), cu: "INR", tn: note }).toString() : "";
+  const paymentUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const googlePayUri = paymentQuery
+    ? isIOS ? `gpay://upi/pay?${paymentQuery}` : `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end`
+    : "";
+  const paytmUri = paymentQuery && isAndroid
+    ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=net.one97.paytm;end`
+    : "";
   useEffect(() => {
     let cancelled = false;
     let objectUrl = "";
@@ -595,6 +615,14 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
     const { error } = await supabase.rpc("submit_payment_reference", { p_order_id: order.id, p_reference: reference.trim() });
     setMessage(error ? error.message : "Payment reference sent. The kitchen will verify it shortly.");
   }
+  async function copyUpiId() {
+    try {
+      await navigator.clipboard.writeText(settings.upi_id);
+      setCopyMessage("UPI ID copied");
+    } catch {
+      setCopyMessage(`UPI ID: ${settings.upi_id}`);
+    }
+  }
   return (
     <div className="store-modal-bg">
       <section className="payment-sheet">
@@ -609,8 +637,14 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
               {qr ? <img src={qr} alt="UPI payment QR" /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}
               <div>
                 <b>Pay with any UPI app</b>
-                <small>{qrKind === "custom" ? "Scan Neeru’s Kitchen payment QR, or tap below to pay the exact order amount." : "Scan on a computer, or tap below on your phone."}</small>
-                <a href={paymentUri}>Open GPay or UPI app</a>
+                <small>{qrKind === "custom" ? "Scan Neeru’s Kitchen QR from another screen, or choose your payment app below." : "Scan from another screen, or choose your payment app below."}</small>
+                <div className="upi-app-actions">
+                  <a className="gpay-action" href={googlePayUri}>Google Pay</a>
+                  {paytmUri && <a className="paytm-action" href={paytmUri}>Paytm</a>}
+                  <a href={paymentUri}>Any UPI app</a>
+                </div>
+                <div className="upi-id-row"><code>{settings.upi_id}</code><button type="button" onClick={copyUpiId}>Copy</button></div>
+                {copyMessage && <span className="upi-copy-message">{copyMessage}</span>}
               </div>
             </div>
             <label className="reference-field"><span>UPI transaction reference</span><div><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Enter after payment" /><button type="button" onClick={submitReference}>Submit</button></div></label>
