@@ -47,13 +47,7 @@ import "./storefront.css";
 import { Storefront } from "./storefront";
 import { supabase } from "./supabase";
 
-type Stage =
-  | "new"
-  | "confirmed"
-  | "preparing"
-  | "ready"
-  | "out_for_delivery"
-  | "delivered";
+type Stage = "new" | "delivered";
 type DeliveryBy = "nanny" | "others";
 type Screen = "orders" | "menu" | "settings";
 
@@ -124,14 +118,11 @@ type AdminStoreSettings = {
 type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
 type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
 
-const stages: { key: Stage; label: string; short: string; color: string }[] = [
-  { key: "new", label: "New", short: "New", color: "blue" },
-  { key: "confirmed", label: "Confirmed", short: "Confirmed", color: "violet" },
-  { key: "preparing", label: "Preparing", short: "Cooking", color: "orange" },
-  { key: "ready", label: "Ready", short: "Ready", color: "teal" },
-  { key: "out_for_delivery", label: "Out for delivery", short: "On the way", color: "amber" },
-  { key: "delivered", label: "Delivered", short: "Delivered", color: "green" },
+const stages: { key: Stage; label: string; badge: string; short: string; color: string }[] = [
+  { key: "new", label: "Orders", badge: "Order", short: "Orders", color: "blue" },
+  { key: "delivered", label: "Delivered", badge: "Delivered", short: "Delivered", color: "green" },
 ];
+const normalizeStage = (value?: string): Stage => value === "delivered" ? "delivered" : "new";
 
 const starterMenu: MenuItem[] = [
   ["veg-sandwich", "Veg sandwich", 120],
@@ -321,7 +312,8 @@ export function AdminApp() {
     if (error) setNotice(`Could not load orders: ${error.message}`);
     else {
       const resolved = await Promise.all(
-        ((data ?? []) as Order[]).map(async (order) => {
+        ((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map(async (rawOrder) => {
+          const order = { ...rawOrder, stage: normalizeStage(rawOrder.stage) } as Order;
           if (!order.photo_path) return order;
           return { ...order, photo_url: await getPrivatePhotoUrl(order.photo_path, session) };
         }),
@@ -391,7 +383,7 @@ export function AdminApp() {
         .from("orders")
         .select("*")
         .eq("source", "customer")
-        .eq("stage", "new")
+        .neq("stage", "delivered")
         .order("created_at", { ascending: false })
         .limit(30),
     ]);
@@ -402,7 +394,8 @@ export function AdminApp() {
       setNotice(`Could not load online order alerts: ${orderResult.error.message}`);
     }
     const requests = (requestResult.data || []) as CustomerAccessRequest[];
-    const onlineOrders = (orderResult.data || []) as Order[];
+    const onlineOrders = ((orderResult.data || []) as (Omit<Order, "stage"> & { stage: string })[])
+      .map((order) => ({ ...order, stage: normalizeStage(order.stage) } as Order));
     const nextIds = new Set([
       ...requests.map((request) => `signup:${request.id}`),
       ...onlineOrders.map((order) => `order:${order.id}`),
@@ -1092,15 +1085,14 @@ function Stat({ label, value, tone = "", icon, compact = false }: { label: strin
 }
 function StageBadge({ stage }: { stage: Stage }) {
   const s = stages.find((x) => x.key === stage)!;
-  return <span className={`stage ${s.color}`}><i />{s.label}</span>;
+  return <span className={`stage ${s.color}`}><i />{s.badge}</span>;
 }
 function menuImageFor(order: Order, menuItems: MenuItem[]) {
   const details = order.order_details.toLowerCase();
   return menuItems.find((item) => details.includes(item.name.toLowerCase()))?.photo_url;
 }
 function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void }) {
-  const current = stages.findIndex((s) => s.key === order.stage);
-  const next = stages[current + 1];
+  const canDeliver = order.stage !== "delivered";
   const image = order.photo_url || menuImageFor(order, menuItems);
   const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
   return (
@@ -1122,7 +1114,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
           <button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit details</button>
-          {next && <button className="move-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: next.key }); }}>Move to {next.short}<ChevronRight size={16} /></button>}
+          {canDeliver && <button className="move-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "delivered" }); }}>Mark delivered<Check size={16} /></button>}
         </div>
       </div>
     </article>

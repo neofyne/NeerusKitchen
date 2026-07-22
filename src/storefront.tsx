@@ -71,6 +71,13 @@ type StoreSettings = {
   whatsapp_number: string;
 };
 
+type OrderAlertResult = {
+  automatic: boolean;
+  whatsappUrl: string;
+  status: "sent" | "business_api_failed" | "tap_to_send" | "no_recipient";
+  includesPhoto?: boolean;
+};
+
 const starterImages: Record<string, string> = {
   "Veg sandwich": "/food/veg-sandwich.jpg",
   "Paneer sandwich": "/food/paneer-sandwich.jpg",
@@ -98,12 +105,9 @@ const starterCatalog = [
 ].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
 const stageLabels: Record<string, string> = {
   new: "Order placed",
-  confirmed: "Confirmed",
-  preparing: "Cooking",
-  ready: "Ready",
-  out_for_delivery: "On the way",
   delivered: "Delivered",
 };
+const customerStage = (stage: string) => stage === "delivered" ? "delivered" : "new";
 
 const defaultSettings: StoreSettings = {
   ordering_open: true,
@@ -155,6 +159,7 @@ export function Storefront() {
   const [authOpen, setAuthOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [placedOrder, setPlacedOrder] = useState<CustomerOrder | null>(null);
+  const [placedAlert, setPlacedAlert] = useState<OrderAlertResult | null>(null);
   const [notice, setNotice] = useState("");
   const [phonePreview, setPhonePreview] = useState(false);
 
@@ -326,8 +331,8 @@ export function Storefront() {
       </nav>
 
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Home Kitchen."); }} />}
-      {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
-      {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
+      {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order, alert) => { setCheckoutOpen(false); setPlacedOrder(order); setPlacedAlert(alert); setCart({}); loadOrders(); }} />}
+      {placedOrder && <PaymentModal order={placedOrder} settings={settings} alert={placedAlert} onClose={() => { setPlacedOrder(null); setPlacedAlert(null); go("orders"); }} />}
       {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Home Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>WhatsApp us</b><small>{whatsappDisplay}</small></span></a>}
       </div>
     </div>
@@ -351,7 +356,7 @@ function CartView({ lines, total, orderingOpen, onQuantity, onBack, onCheckout }
 }
 
 function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>Follow every meal from Neeru’s Home Kitchen to your door.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${order.stage}`}><i />{stageLabels[order.stage] || order.stage}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>)}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>See which meals are still open and which have been delivered.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => { const visibleStage = customerStage(order.stage); return <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${visibleStage}`}><i />{stageLabels[visibleStage]}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>; })}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
 }
 
 function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
@@ -552,7 +557,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
   return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && !isPhoneAccount && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{isPhoneAccount ? "Mobile login" : session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={isPhoneAccount || Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
-function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {
+function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder, alert: OrderAlertResult | null) => void }) {
   const [deliveryTime, setDeliveryTime] = useState("");
   const [instructions, setInstructions] = useState("");
   const [busy, setBusy] = useState(false);
@@ -562,12 +567,28 @@ function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile
     const { data, error } = await supabase.rpc("place_customer_order", { p_delivery_time: deliveryTime || null, p_instructions: instructions, p_items: lines.map((item) => ({ menu_item_id: item.id, quantity: item.quantity })) });
     if (error) { setBusy(false); return setMessage(error.message); }
     const { data: order, error: loadError } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,order_details,delivery_time").eq("id", data).single();
-    setBusy(false); if (loadError) setMessage(loadError.message); else onPlaced(order as CustomerOrder);
+    if (loadError) { setBusy(false); return setMessage(loadError.message); }
+
+    let alert: OrderAlertResult | null = null;
+    try {
+      const { data: auth } = await supabase.auth.getSession();
+      const firstPhoto = lines.find((item) => item.image_url)?.image_url || "";
+      const response = await fetch("/api/order-alert", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${auth.session?.access_token || ""}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ orderId: data, photoUrl: firstPhoto }),
+      });
+      if (response.ok) alert = await response.json() as OrderAlertResult;
+    } catch {
+      // The order is already safely stored and visible to the kitchen app.
+    }
+    setBusy(false);
+    onPlaced(order as CustomerOrder, alert);
   }
   return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div>{profile.standing_instructions && <div className="standing-instruction"><Check /><span><b>Standing instruction applied</b><small>{profile.standing_instructions}</small></span></div>}<label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label><span>Preferred delivery time</span><input type="time" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} items</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">You’ll receive UPI payment instructions after the order is created.</small></form></div>;
 }
 
-function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; settings: StoreSettings; onClose: () => void }) {
+function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrder; settings: StoreSettings; alert: OrderAlertResult | null; onClose: () => void }) {
   const [qr, setQr] = useState("");
   const [qrKind, setQrKind] = useState<"custom" | "generated" | "">("");
   const [reference, setReference] = useState("");
@@ -638,6 +659,11 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
         <span className="store-eyebrow">ORDER RECEIVED</span>
         <h2>Thank you!</h2>
         <p>Order <b>#{order.id.slice(0, 8).toUpperCase()}</b> has been sent to Neeru’s Home Kitchen.</p>
+        <div className={`kitchen-alert-status ${alert?.automatic ? "automatic" : "ready"}`}>
+          <MessageCircle />
+          <span><b>{alert?.automatic ? "WhatsApp alert sent to the kitchen" : "Kitchen app notified"}</b><small>{alert?.automatic ? "The family also received the order details on WhatsApp." : alert?.whatsappUrl ? "The order is live in the admin app. Tap below to send a WhatsApp copy too." : "The order is live in the admin app with its notification sound."}</small></span>
+        </div>
+        {!alert?.automatic && alert?.whatsappUrl && <a className="whatsapp-order-copy" href={alert.whatsappUrl} target="_blank" rel="noreferrer"><MessageCircle /> Send order copy on WhatsApp</a>}
         <div className="payment-total"><span>Amount to pay</span><strong>{formatMoney(Number(order.amount))}</strong></div>
         {paymentUri ? (
           <>

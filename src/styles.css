@@ -175,7 +175,7 @@ img { display: block; max-width: 100%; }
 .setup code { padding: 2px 5px; border-radius: 4px; background: #fff1c9; }
 
 .stage-tabs { display: none; }
-.board { display: grid; grid-template-columns: repeat(6, minmax(250px, 1fr)); gap: 12px; overflow-x: auto; padding: 1px 1px 14px; scrollbar-color: #bdc8c1 transparent; }
+.board { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 1px 1px 14px; }
 .column { min-height: 280px; padding: 10px; border: 1px solid #e4e9e6; border-radius: 15px; background: #f5f7f6; }
 .column-title { display: flex; align-items: center; justify-content: space-between; min-height: 43px; padding: 0 5px 9px; font-size: 13px; font-weight: 800; }
 .column-title span { display: flex; align-items: center; gap: 8px; }
@@ -614,7 +614,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .view-switch { display: flex; margin-left: 0; }
   .view-switch button { width: 39px; padding: 0; justify-content: center; font-size: 0; }
   .view-switch button svg { width: 18px; }
-  .stage-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 0 0 12px; padding: 0; overflow: visible; }
+  .stage-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 0 0 12px; padding: 0; overflow: visible; }
   .stage-tabs button { min-width: 0; min-height: 39px; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 6px; border: 1px solid #dfe5e1; border-radius: 10px; color: #68746c; background: #fff; font-size: 10px; font-weight: 800; white-space: nowrap; }
   .stage-tabs button b { min-width: 20px; height: 20px; display: grid; place-items: center; padding: 0 4px; border-radius: 20px; background: #eff2f0; font-size: 9px; }
   .stage-tabs button.active { border-color: currentColor; background: color-mix(in srgb, currentColor 9%, white); box-shadow: inset 0 0 0 1px currentColor; }
