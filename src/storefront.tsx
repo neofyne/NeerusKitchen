@@ -345,14 +345,14 @@ export function Storefront() {
 
       <main className="store-main">
         {view === "menu" && <>
-          {sharedCategory && sharedCategoryHero ? <SharedCategoryMenu category={sharedCategory} items={sharedCategoryItems} hero={sharedCategoryHero} cart={cart} onQuantity={setQuantity} onCart={() => go("cart")} /> : <>
-          {sharedDish && <section className="shared-dish-banner">
-            <div className="shared-dish-image">{sharedDish.image_url ? <img src={sharedDish.image_url} alt={sharedDish.name} /> : <ChefHat />}</div>
-            <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{sharedDish.name}</h1><p>{sharedDish.promotion_message || sharedDish.description}</p><div className="shared-dish-facts"><strong>{formatMoney(sharedDish.price)}</strong>{sharedDish.portions_available !== null && <span>{sharedDish.portions_available > 0 ? `Only ${sharedDish.portions_available} portions today` : "Sold out"}</span>}{sharedDish.promotion_until && <span>Order before {sharedDish.promotion_until}</span>}</div><button className="store-primary" disabled={sharedDish.portions_available === 0} onClick={() => { setQuantity(sharedDish.id, Math.max(1, cart[sharedDish.id] || 0)); go("cart"); }}>{sharedDish.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
-          </section>}
+          {sharedCategory && sharedCategoryHero
+            ? <SharedCategoryMenu category={sharedCategory} items={sharedCategoryItems} hero={sharedCategoryHero} cart={cart} onQuantity={setQuantity} onCart={() => go("cart")} />
+            : sharedDish
+              ? <SharedDishMenu item={sharedDish} quantity={cart[sharedDish.id] || 0} onQuantity={setQuantity} onCart={() => go("cart")} />
+              : <>
           <section className="store-hero">
             <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${acceptingOrders ? "" : "closed"}`}><i />{acceptingOrders ? "Taking orders today" : settings.ordering_open ? "Today’s order cutoff has passed" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
-            <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} /> : <UtensilsCrossed />}</div>
+            <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} decoding="async" /> : <UtensilsCrossed />}</div>
           </section>
 
           {featured.length > 0 && <section className="featured-section"><div className="store-section-title"><div><span className="store-eyebrow"><Flame /> KITCHEN FAVOURITES</span><h2>Featured today</h2></div></div><div className="featured-row">{featured.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} featured />)}</div></section>}
@@ -390,14 +390,26 @@ function StoreLogo() {
   return <span className="store-logo"><svg viewBox="0 0 48 48"><path d="M17 21c-3-3 2-5 0-9M24 21c-3-3 2-5 0-10M31 21c-3-3 2-5 0-9" /><path className="fill" d="M10.5 25.5h27c-.8 8.2-6.1 12.5-13.5 12.5s-12.7-4.3-13.5-12.5Z" /><path d="M8.5 25.5h31" /></svg></span>;
 }
 
+function SharedDishMenu({ item, quantity, onQuantity, onCart }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; onCart: () => void }) {
+  const soldOut = item.portions_available === 0;
+  const addDish = () => { onQuantity(item.id, Math.max(1, quantity)); onCart(); };
+  return <section className="shared-dish-page">
+    <article className="shared-dish-banner">
+      <div className="shared-dish-image">{item.image_url ? <img src={item.image_url} alt={item.name} decoding="async" /> : <ChefHat />}</div>
+      <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{item.name}</h1><p>{item.promotion_message || item.description}</p><div className="shared-dish-facts"><strong>{formatMoney(item.price)}</strong><small>per {item.unit_label}</small>{item.portions_available !== null && <span>{item.portions_available > 0 ? `Only ${item.portions_available} portions today` : "Sold out"}</span>}{item.promotion_until && <span>Order before {item.promotion_until}</span>}</div><button className="store-primary" disabled={soldOut} onClick={addDish}>{soldOut ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
+    </article>
+    <div className="shared-dish-footer"><span>This link was prepared specially for {item.name}.</span><a href="/">Browse the full menu</a></div>
+  </section>;
+}
+
 function SharedCategoryMenu({ category, items, hero, cart, onQuantity, onCart }: { category: StoreCategory; items: StoreMenuItem[]; hero: StoreMenuItem; cart: Record<string, number>; onQuantity: (id: string, quantity: number) => void; onCart: () => void }) {
   const others = items.filter((item) => item.id !== hero.id);
   const heroQuantity = cart[hero.id] || 0;
   const addHero = () => { onQuantity(hero.id, Math.max(1, heroQuantity)); onCart(); };
   return <section className="shared-category-page">
     <div className="shared-category-intro"><span className="store-eyebrow"><MessageCircle /> SHARED MENU</span><h1>{category.name}</h1><p>{category.description || "Made fresh after you order, so every portion is prepared just for you."}</p></div>
-    <article className="shared-category-hero"><div className="shared-category-hero-image">{hero.image_url ? <img src={hero.image_url} alt={hero.name} /> : <ChefHat />}</div><div className="shared-category-hero-copy"><span>FEATURED DISH</span><h2>{hero.name}</h2><p>{hero.promotion_message || hero.description}</p><div><strong>{formatMoney(hero.price)}</strong><small>per {hero.unit_label}</small></div><button className="store-primary" disabled={hero.portions_available === 0} onClick={addHero}>{hero.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div></article>
-    {others.length > 0 && <div className="shared-category-list"><div className="shared-category-list-head"><b>More from {category.name}</b><span>{others.length} more dish{others.length === 1 ? "" : "es"}</span></div>{others.map((item) => { const quantity = cart[item.id] || 0; const soldOut = item.portions_available === 0; return <article key={item.id}><div className="shared-category-thumb">{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{item.description}</small><strong>{formatMoney(item.price)} / {item.unit_label}</strong></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || quantity >= 20} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="compact-add" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Sold out" : <>Add <Plus /></>}</button>}</article>; })}</div>}
+    <article className="shared-category-hero"><div className="shared-category-hero-image">{hero.image_url ? <img src={hero.image_url} alt={hero.name} decoding="async" /> : <ChefHat />}</div><div className="shared-category-hero-copy"><span>FEATURED DISH</span><h2>{hero.name}</h2><p>{hero.promotion_message || hero.description}</p><div className="shared-category-hero-facts"><strong>{formatMoney(hero.price)}</strong><small>per {hero.unit_label}</small>{hero.portions_available !== null && <em>{hero.portions_available > 0 ? `Only ${hero.portions_available} portions today` : "Sold out"}</em>}{hero.promotion_until && <em>Order before {hero.promotion_until}</em>}</div><button className="store-primary" disabled={hero.portions_available === 0} onClick={addHero}>{hero.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div></article>
+    {others.length > 0 && <div className="shared-category-list"><div className="shared-category-list-head"><b>More from {category.name}</b><span>{others.length} more dish{others.length === 1 ? "" : "es"}</span></div>{others.map((item) => { const quantity = cart[item.id] || 0; const soldOut = item.portions_available === 0; return <article key={item.id}><div className="shared-category-thumb">{item.image_url ? <img src={item.image_url} alt="" loading="lazy" decoding="async" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{item.description}</small><strong>{formatMoney(item.price)} / {item.unit_label}</strong></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)} aria-label={`Decrease ${item.name} quantity`}><Minus /></button><b>{quantity}</b><button disabled={soldOut || quantity >= 20} onClick={() => onQuantity(item.id, quantity + 1)} aria-label={`Increase ${item.name} quantity`}><Plus /></button></div> : <button className="compact-add" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Sold out" : <>Add <Plus /></>}</button>}</article>; })}</div>}
     <div className="shared-category-footer"><span>Made fresh after you order.</span><button onClick={onCart}><ShoppingBag /> View cart</button></div>
   </section>;
 }
@@ -405,7 +417,7 @@ function SharedCategoryMenu({ category, items, hero, cart, onQuantity, onCart }:
 function FoodCard({ item, quantity, onQuantity, featured = false }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; featured?: boolean }) {
   const soldOut = item.portions_available === 0;
   return <article className={`store-food-card ${featured ? "featured-card" : ""} ${soldOut ? "sold-out" : ""}`}>
-    <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
+    <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} loading="lazy" decoding="async" /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
     <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><span className="dish-price"><strong>{formatMoney(item.price)}</strong><small>/ {item.unit_label}</small></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
   </article>;
 }

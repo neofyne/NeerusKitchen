@@ -2,7 +2,8 @@ import { getStore } from "@netlify/blobs";
 import type { Config } from "@netlify/functions";
 
 const STORE_NAME = "neeru-private-photos";
-const MAX_PHOTO_SIZE = 6 * 1024 * 1024;
+const MAX_PAYMENT_PHOTO_SIZE = 6 * 1024 * 1024;
+const MAX_MENU_PHOTO_SIZE = 512 * 1024;
 const MAX_ORDER_PHOTO_SIZE = 160 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
 const VALID_PRIVATE_KEY = /^(orders|menu)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
@@ -67,9 +68,13 @@ export default async (request: Request) => {
     if (!(photo instanceof File) || (purpose !== "orders" && purpose !== "menu" && purpose !== "payment")) {
       return json(request, { error: "A valid photo and purpose are required" }, { status: 400 });
     }
-    const maximumSize = purpose === "orders" ? MAX_ORDER_PHOTO_SIZE : MAX_PHOTO_SIZE;
+    const maximumSize = purpose === "orders" ? MAX_ORDER_PHOTO_SIZE : purpose === "menu" ? MAX_MENU_PHOTO_SIZE : MAX_PAYMENT_PHOTO_SIZE;
     if (!ALLOWED_TYPES.has(photo.type) || photo.size > maximumSize) {
-      const limit = purpose === "orders" ? "160 KB (order photos are compressed on your phone)" : "6 MB";
+      const limit = purpose === "orders"
+        ? "160 KB (order photos are compressed on your phone)"
+        : purpose === "menu"
+          ? "512 KB (dish photos are compressed automatically before upload)"
+          : "6 MB";
       return json(request, { error: `Use a JPG, PNG, WebP or HEIC image under ${limit}` }, { status: 400 });
     }
 
@@ -111,13 +116,23 @@ export default async (request: Request) => {
     const entry = await store.getWithMetadata(key, { type: "arrayBuffer", consistency: "strong" });
     if (!entry?.data) return json(request, { error: "Photo not found" }, { status: 404 });
     const contentType = String(entry.metadata?.contentType || "application/octet-stream");
+    const cacheControl = key === "payment/current"
+      ? "no-store"
+      : key.startsWith("menu/")
+        ? "public, max-age=31536000, immutable"
+        : "private, max-age=3600";
+    const etag = entry.etag.startsWith('"') ? entry.etag : `"${entry.etag}"`;
+    const responseHeaders = {
+      "Content-Type": contentType,
+      "Cache-Control": cacheControl,
+      ETag: etag,
+      ...corsHeaders(request),
+    };
+    if (key.startsWith("menu/") && request.headers.get("if-none-match")?.split(",").map((value) => value.trim()).includes(etag)) {
+      return new Response(null, { status: 304, headers: responseHeaders });
+    }
     return new Response(entry.data, {
-      headers: {
-        "Content-Type": contentType,
-        "Cache-Control": key === "payment/current" ? "no-store" : "private, max-age=3600",
-        ETag: entry.etag,
-        ...corsHeaders(request),
-      },
+      headers: responseHeaders,
     });
   }
 

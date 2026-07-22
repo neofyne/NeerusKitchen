@@ -142,7 +142,7 @@ type StorageSection = { count: number; knownBytes: number; unknownSizes: number 
 type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: StorageSection };
 type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
 type OrderDeletionReason = "cancelled" | "unpaid" | "duplicate" | "mistake" | "unavailable" | "other";
-type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string };
+type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string; includeCategory: boolean };
 type CategoryPromotionValues = { heroId: string; message: string };
 type PreparedPromotion = { title: string; text: string; url: string; image?: File };
 type AdminStoreSettings = {
@@ -195,33 +195,64 @@ const stages: { key: Stage; label: string; badge: string; short: string; color: 
 ];
 const normalizeStage = (value?: string): Stage => value === "delivered" ? "delivered" : "new";
 
-async function compressOrderPhoto(file: File) {
-  const source = await new Promise<HTMLImageElement>((resolve, reject) => {
+type PhotoCompressionPreset = { longestSide: number; targetBytes: number; label: string };
+
+async function decodePhoto(file: File) {
+  if (!file.type.startsWith("image/")) throw new Error("Please choose a photo from your phone or computer.");
+  if ("createImageBitmap" in window) {
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      return { source: bitmap as CanvasImageSource, width: bitmap.width, height: bitmap.height, dispose: () => bitmap.close() };
+    } catch {
+      // Safari can decode some iPhone formats through an image element even when createImageBitmap cannot.
+    }
+  }
+  return new Promise<{ source: CanvasImageSource; width: number; height: number; dispose: () => void }>((resolve, reject) => {
     const image = new Image();
     const url = URL.createObjectURL(file);
-    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
-    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("This photo format could not be compressed. Please choose a JPG, PNG or WebP image.")); };
+    image.onload = () => resolve({ source: image, width: image.naturalWidth, height: image.naturalHeight, dispose: () => URL.revokeObjectURL(url) });
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("This phone photo could not be read. Please choose a JPG, PNG, HEIC or WebP image.")); };
     image.src = url;
   });
-  const longestSide = 360;
-  const scale = Math.min(1, longestSide / Math.max(source.naturalWidth, source.naturalHeight));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
-  canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
-  const context = canvas.getContext("2d", { alpha: false });
-  if (!context) throw new Error("This browser could not prepare the order photo.");
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(source, 0, 0, canvas.width, canvas.height);
-
-  let compressed: Blob | null = null;
-  for (const quality of [0.48, 0.38, 0.3, 0.23]) {
-    compressed = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", quality));
-    if (compressed && compressed.size <= 32 * 1024) break;
-  }
-  if (!compressed) throw new Error("This browser could not compress the order photo.");
-  return new File([compressed], `${file.name.replace(/\.[^.]+$/, "") || "order"}.webp`, { type: "image/webp" });
 }
+
+async function compressPhoto(file: File, preset: PhotoCompressionPreset) {
+  const decoded = await decodePhoto(file);
+  let smallest: Blob | null = null;
+  try {
+    let longestSide = Math.min(preset.longestSide, Math.max(decoded.width, decoded.height));
+    for (let pass = 0; pass < 5; pass += 1) {
+      const scale = Math.min(1, longestSide / Math.max(decoded.width, decoded.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(decoded.width * scale));
+      canvas.height = Math.max(1, Math.round(decoded.height * scale));
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) throw new Error(`This browser could not prepare the ${preset.label} photo.`);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(decoded.source, 0, 0, canvas.width, canvas.height);
+
+      for (const quality of [0.82, 0.72, 0.62, 0.52, 0.42, 0.32]) {
+        const candidate = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", quality));
+        if (!candidate) continue;
+        if (!smallest || candidate.size < smallest.size) smallest = candidate;
+        if (candidate.size <= preset.targetBytes) {
+          return new File([candidate], `${file.name.replace(/\.[^.]+$/, "") || preset.label}.webp`, { type: "image/webp" });
+        }
+      }
+      longestSide = Math.max(320, Math.round(longestSide * 0.78));
+    }
+  } finally {
+    decoded.dispose();
+  }
+  if (!smallest) throw new Error(`This browser could not compress the ${preset.label} photo.`);
+  return new File([smallest], `${file.name.replace(/\.[^.]+$/, "") || preset.label}.webp`, { type: "image/webp" });
+}
+
+const compressOrderPhoto = (file: File) => compressPhoto(file, { longestSide: 360, targetBytes: 32 * 1024, label: "order" });
+const compressMenuPhoto = (file: File) => compressPhoto(file, { longestSide: 1400, targetBytes: 260 * 1024, label: "dish" });
 
 function readableBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -712,7 +743,7 @@ export function AdminApp() {
   async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "payment") {
     if (!session) throw new Error("Please sign in again before uploading a photo.");
     const form = new FormData();
-    const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : photo;
+    const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : purpose === "menu" ? await compressMenuPhoto(photo) : photo;
     form.append("photo", preparedPhoto);
     form.append("purpose", purpose);
     const response = await fetch(photoApiUrl(), {
@@ -1015,9 +1046,11 @@ export function AdminApp() {
   async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label">, photo?: File, existing?: MenuItem) {
     if (!supabase || !session) return;
     let photoPath: string | null = existing?.photo_path ?? null;
+    let uploadedPhotoPath: string | null = null;
     if (photo) {
       try {
-        photoPath = await uploadPhoto(photo, "menu");
+        uploadedPhotoPath = await uploadPhoto(photo, "menu");
+        photoPath = uploadedPhotoPath;
       } catch (error) {
         return setNotice(error instanceof Error ? error.message : "Could not upload menu photo.");
       }
@@ -1026,8 +1059,14 @@ export function AdminApp() {
     const { error } = existing
       ? await supabase.from("menu_items").update(record).eq("id", existing.id)
       : await supabase.from("menu_items").insert(record);
-    if (error) setNotice(`Could not save menu item: ${error.message}`);
+    if (error) {
+      if (uploadedPhotoPath) await deletePhotoKeys([uploadedPhotoPath]).catch(() => undefined);
+      setNotice(`Could not save menu item: ${error.message}`);
+    }
     else {
+      if (uploadedPhotoPath && existing?.photo_path && existing.photo_path !== uploadedPhotoPath) {
+        await deletePhotoKeys([existing.photo_path]).catch(() => undefined);
+      }
       setMenuAdding(false);
       setMenuEditing(null);
       setNotice(`${values.name} was ${existing ? "updated" : "added to the dish catalogue"}.`);
@@ -1085,6 +1124,12 @@ export function AdminApp() {
 
   async function prepareDishPromotion(item: MenuItem, values: PromotionValues): Promise<PreparedPromotion> {
     if (!supabase) throw new Error("The shared database is not connected.");
+    const sharedCategory = values.includeCategory
+      ? dishCategories.find((category) => category.id === item.category_id && category.is_active)
+      : undefined;
+    const categoryItems = sharedCategory
+      ? menuItems.filter((candidate) => candidate.is_active && candidate.category_id === sharedCategory.id)
+      : [];
     const daily = {
       menu_item_id: item.id,
       menu_date: today(),
@@ -1095,7 +1140,19 @@ export function AdminApp() {
       promotion_message: values.message.trim(),
       promotion_until: values.until || null,
     };
-    const { error } = await supabase.from("daily_menu").upsert(daily, { onConflict: "menu_item_id,menu_date" });
+    const dailyRows = sharedCategory && categoryItems.length > 1
+      ? categoryItems.map((candidate) => candidate.id === item.id ? daily : {
+        menu_item_id: candidate.id,
+        menu_date: today(),
+        is_available: true,
+        is_featured: Boolean(candidate.daily?.is_featured),
+        portions_available: candidate.daily?.portions_available ?? null,
+        special_price: candidate.daily?.special_price ?? null,
+        promotion_message: candidate.daily?.promotion_message || "",
+        promotion_until: candidate.daily?.promotion_until || null,
+      })
+      : [daily];
+    const { error } = await supabase.from("daily_menu").upsert(dailyRows, { onConflict: "menu_item_id,menu_date" });
     if (error) throw new Error(`Could not save today’s promotion: ${error.message}`);
     const price = Number(values.specialPrice ?? item.price);
     const lines = [`🍲 *${item.name}*`, values.message.trim() || item.description || "Freshly prepared at Neeru’s Home Kitchen.", `Today: ${money(price)}`];
@@ -1103,7 +1160,9 @@ export function AdminApp() {
     if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
     if (values.until) lines.push(`Order before ${values.until}`);
     const dishSlug = item.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    const url = `${window.location.origin}/d/${encodeURIComponent(dishSlug || item.id.slice(0, 8))}`;
+    const url = sharedCategory && categoryItems.length > 1
+      ? `${window.location.origin}/c/${encodeURIComponent(sharedCategory.slug)}/${encodeURIComponent(dishSlug || item.id.slice(0, 8))}`
+      : `${window.location.origin}/d/${encodeURIComponent(dishSlug || item.id.slice(0, 8))}`;
     let imageFile: File | undefined;
     if (item.photo_url) {
       try {
@@ -1580,7 +1639,7 @@ export function AdminApp() {
         {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
         {deliveringOrder && <CompleteDeliveryModal order={deliveringOrder} busy={deliveryBusy} onClose={() => { if (!deliveryBusy) setDeliveringOrder(null); }} onConfirm={() => confirmOrderDelivery(deliveringOrder)} />}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} categories={dishCategories} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
-        {promotingItem && <PromotionModal item={promotingItem} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
+        {promotingItem && <PromotionModal item={promotingItem} category={dishCategories.find((category) => category.id === promotingItem.category_id && category.is_active)} categoryDishCount={menuItems.filter((candidate) => candidate.is_active && candidate.category_id === promotingItem.category_id).length} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
         {(categoryAdding || categoryEditing) && <CategoryForm category={categoryEditing} onClose={() => { setCategoryAdding(false); setCategoryEditing(null); }} onSave={saveDishCategory} />}
         {promotingCategory && <CategoryPromotionModal category={promotingCategory} items={menuItems.filter((item) => item.category_id === promotingCategory.id && item.is_active)} onClose={() => setPromotingCategory(null)} onPrepare={prepareCategoryPromotion} />}
       </div>
@@ -2319,7 +2378,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
         </article>
 
         <article className="settings-card export-card storage-cleanup-card">
-          <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Storage &amp; cleanup</h2><InfoTip label="About photo storage">Order photos are temporary private thumbnails; menu photos remain until removed or replaced. Photos live in the private Netlify Blobs store. Supabase keeps only an opaque key. New order photos are reduced to a 360 px WebP thumbnail and removed automatically when marked delivered.</InfoTip></span></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
+          <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Storage &amp; cleanup</h2><InfoTip label="About photo storage">Order photos are temporary private thumbnails; menu photos remain until removed or replaced. Photos live in the private Netlify Blobs store and Supabase keeps only an opaque key. New order photos become tiny 360 px WebP thumbnails. High-resolution dish photos are automatically reduced to a fast-loading WebP and served with long-term browser caching.</InfoTip></span></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
           <div className="storage-summary">
             <span><Camera /><b>{storageSummary?.orders?.count ?? "—"}</b><small>Order photos{storageSummary?.orders ? ` · ${readableBytes(storageSummary.orders.knownBytes)} tracked` : ""}</small></span>
             <span><ChefHat /><b>{storageSummary?.menu?.count ?? "—"}</b><small>Uploaded menu photos{storageSummary?.menu ? ` · ${readableBytes(storageSummary.menu.knownBytes)} tracked` : ""}</small></span>
@@ -2530,11 +2589,12 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   );
 }
 
-function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose: () => void; onPrepare: (item: MenuItem, values: PromotionValues) => Promise<PreparedPromotion> }) {
+function PromotionModal({ item, category, categoryDishCount, onClose, onPrepare }: { item: MenuItem; category?: DishCategory; categoryDishCount: number; onClose: () => void; onPrepare: (item: MenuItem, values: PromotionValues) => Promise<PreparedPromotion> }) {
   const [message, setMessage] = useState(item.daily?.promotion_message || `Today’s special: ${item.name}, freshly prepared in our home kitchen.`);
   const [specialPrice, setSpecialPrice] = useState<string>(item.daily?.special_price === null || item.daily?.special_price === undefined ? "" : String(item.daily.special_price));
   const [portions, setPortions] = useState<string>(item.daily?.portions_available === null || item.daily?.portions_available === undefined ? "" : String(item.daily.portions_available));
   const [until, setUntil] = useState(item.daily?.promotion_until || "");
+  const [includeCategory, setIncludeCategory] = useState(false);
   const [prepared, setPrepared] = useState<PreparedPromotion | null>(null);
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
@@ -2557,9 +2617,10 @@ function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose:
         specialPrice: parsedPrice,
         portions: parsedPortions,
         until,
+        includeCategory,
       });
       setPrepared(result);
-      setFeedback("Today’s offer is live. Share it directly from here—there is no need to open the customer storefront.");
+      setFeedback(includeCategory && category ? `Today’s offer is live. ${item.name} will lead the shared page, followed by the other ${category.name} dishes.` : "Today’s offer is live. The shared page will show only this dish before customers continue to order.");
     } catch (reason) {
       setError(true);
       setFeedback(reason instanceof Error ? reason.message : "Could not prepare this promotion.");
@@ -2589,7 +2650,8 @@ function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose:
       <label><span>Limited portions <small>Optional</small></span><input type="number" min="0" value={portions} onChange={(event) => { setPortions(event.target.value); setPrepared(null); }} placeholder="For example, 10" /></label>
       <label className="wide"><span>Order before <small>Optional</small></span><input type="time" value={until} onChange={(event) => { setUntil(event.target.value); setPrepared(null); }} /></label>
     </div>
-    <p className="promotion-note"><MessageCircle /> Sharing creates a dish-specific WhatsApp preview with its image. Customers tap it, see this offer, add the dish and order.</p>
+    {category && categoryDishCount > 1 && <label className="share-category-choice"><input type="checkbox" checked={includeCategory} onChange={(event) => { setIncludeCategory(event.target.checked); setPrepared(null); }} /><span><b>Also show the complete {category.name} category</b><small>{item.name} stays large and featured. The other {categoryDishCount - 1} dishes appear below with small photos, details and Add buttons.</small></span></label>}
+    <p className="promotion-note"><MessageCircle /> {includeCategory && category ? `The WhatsApp preview features ${item.name}; tapping it opens the complete ${category.name} selection.` : "The WhatsApp preview and shared page feature only this dish."}</p>
     {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
     {prepared && <a className="promotion-ready-link" href={prepared.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Preview what customers will see</a>}
     <div className="modal-actions promotion-actions"><button type="button" className="cancel" onClick={onClose}>Close</button><span />{prepared ? <button type="button" className="save whatsapp-share-button" onClick={share}><MessageCircle /> Share now</button> : <button type="button" className="save" disabled={busy || !message.trim()} onClick={prepare}><Check /> {busy ? "Preparing…" : "Save offer & prepare"}</button>}</div>
@@ -2650,7 +2712,17 @@ function MenuItemForm({ item, categories, onClose, onSave }: { item: MenuItem | 
   const [unitLabel, setUnitLabel] = useState(item?.unit_label || "portion");
   const [photo, setPhoto] = useState<File>();
   const [preview, setPreview] = useState<string | undefined>(item?.photo_url);
-  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={(e) => { e.preventDefault(); onSave({ name, price, description, spice_level: spiceLevel, category_id: categoryId || null, unit_label: unitLabel }, photo, item || undefined); }}><div className="modal-head"><div><span className="eyebrow">DISH CATALOGUE</span><h2>{item ? "Edit dish" : "Add dish"}</h2><p>Save the category, selling unit and customer-facing dish details.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Dish name" value={name} onChange={setName} /><Field label="Price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label><span>Category</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} required><option value="" disabled>Choose category</option>{categories.filter((category) => category.is_active || category.id === item?.category_id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><Field label="Selling unit" value={unitLabel} onChange={setUnitLabel} /><div className="wide field-hint"><Info size={15} /><span>Examples: <b>2 pcs</b>, <b>plate</b>, <b>bowl</b> or <b>500 g</b>. The entered price applies to one of these units.</span></div><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Dish photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <img src={preview} alt="Selected dish" /> : <><Camera /><b>Take or choose a clear dish photo</b><small>Square photos work best</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save">{item ? <Check size={19} /> : <Plus size={19} />} {item ? "Save dish" : "Add dish"}</button></div></form></div>;
+  const [saving, setSaving] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await onSave({ name, price, description, spice_level: spiceLevel, category_id: categoryId || null, unit_label: unitLabel }, photo, item || undefined);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={submit}><div className="modal-head"><div><span className="eyebrow">DISH CATALOGUE</span><h2>{item ? "Edit dish" : "Add dish"}</h2><p>Save the category, selling unit and customer-facing dish details.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Dish name" value={name} onChange={setName} /><Field label="Price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label><span>Category</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} required><option value="" disabled>Choose category</option>{categories.filter((category) => category.is_active || category.id === item?.category_id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><Field label="Selling unit" value={unitLabel} onChange={setUnitLabel} /><div className="wide field-hint"><Info size={15} /><span>Examples: <b>2 pcs</b>, <b>plate</b>, <b>bowl</b> or <b>500 g</b>. The entered price applies to one of these units.</span></div><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Dish photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <><img src={preview} alt="Selected dish" /><small>{photo ? `${readableBytes(photo.size)} selected · automatically resized and compressed when saved` : "Current dish photo"}</small></> : <><Camera /><b>Take or choose any phone photo</b><small>Large and high-resolution photos are automatically resized to a fast-loading WebP image.</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose} disabled={saving}>Cancel</button><button className="save" disabled={saving}>{saving ? <span className="loader" /> : item ? <Check size={19} /> : <Plus size={19} />} {saving ? photo ? "Optimizing photo…" : "Saving…" : item ? "Save dish" : "Add dish"}</button></div></form></div>;
 }
 
 function Field({ label, value, onChange, type = "text", wide = false, textarea = false, autoFocus = false }: { label: string; value: string; onChange: (v: string) => void; type?: string; wide?: boolean; textarea?: boolean; autoFocus?: boolean }) {
