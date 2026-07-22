@@ -1486,7 +1486,7 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
   const featuredCount = activeItems.filter((item) => item.daily?.is_available && item.daily?.is_featured).length;
   return (
     <>
-      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><h1>Menu & selling</h1><p>Manage the recipe catalogue, today’s availability, featured dishes and payment instructions.</p></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add recipe</button></section>
+      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><span className="page-title-with-info"><h1>Menu & selling</h1><InfoTip label="About menu and selling">Manage the recipe catalogue, today’s availability, featured dishes and payment instructions.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add recipe</button></section>
       <section className="storefront-manager">
         <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
         <div className="manager-fields">
@@ -1780,7 +1780,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   return (
     <>
       <section className="page-heading settings-heading">
-        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><span className="settings-page-title"><h1>Settings</h1><InfoTip label="About settings">Manage payments, appearance, exports and kitchen records securely.</InfoTip></span></div>
+        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><span className="page-title-with-info"><h1>Settings</h1><InfoTip label="About settings">Manage payments, appearance, exports and kitchen records securely.</InfoTip></span></div>
       </section>
       <section className="settings-grid">
         <article className="settings-card account-settings-card">
