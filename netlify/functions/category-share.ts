@@ -22,7 +22,9 @@ const safeDecode = (value: string) => { try { return decodeURIComponent(value); 
 const formatTime12 = (value: string) => {
   const [hourValue, minuteValue] = value.slice(0, 5).split(":").map(Number);
   if (!Number.isInteger(hourValue) || !Number.isInteger(minuteValue)) return value.slice(0, 5);
-  return `${hourValue % 12 || 12}:${String(minuteValue).padStart(2, "0")} ${hourValue >= 12 ? "PM" : "AM"}`;
+  const rounded = Math.ceil((hourValue * 60 + minuteValue) / 15) * 15 % (24 * 60);
+  const roundedHour = Math.floor(rounded / 60);
+  return `${roundedHour % 12 || 12}:${String(rounded % 60).padStart(2, "0")} ${roundedHour >= 12 ? "PM" : "AM"}`;
 };
 const indiaDate = () => {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());

@@ -11,7 +11,8 @@ export function ceilTimeToQuarter(value: string) {
 }
 
 export function formatTime12(value: string) {
-  const match = value.trim().match(/^(\d{1,2}):(\d{2})/);
+  const normalized = ceilTimeToQuarter(value);
+  const match = normalized.match(/^(\d{1,2}):(\d{2})/);
   if (!match) return "";
   const hour24 = Number(match[1]);
   const minute = Number(match[2]);
