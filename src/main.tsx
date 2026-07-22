@@ -1,5 +1,5 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { Session } from "@supabase/supabase-js";
 import QRCode from "qrcode";
 import {
@@ -18,6 +18,7 @@ import {
   FileSpreadsheet,
   HardDrive,
   IndianRupee,
+  Info,
   KeyRound,
   LayoutDashboard,
   List,
@@ -1468,6 +1469,34 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
+function InfoTip({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const tipRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!tipRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  return (
+    <span className={`info-popout ${open ? "open" : ""}`} ref={tipRef}>
+      <button type="button" className="info-popout-trigger" aria-label={label} aria-expanded={open} onClick={() => setOpen((current) => !current)}><Info /></button>
+      {open && <span className="info-popout-card" role="note">{children}</span>}
+    </span>
+  );
+}
+
 function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
@@ -1702,11 +1731,11 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   return (
     <>
       <section className="page-heading settings-heading">
-        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><h1>Settings</h1><p>Manage payments, appearance, exports and kitchen records securely.</p></div>
+        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><span className="settings-page-title"><h1>Settings</h1><InfoTip label="About settings">Manage payments, appearance, exports and kitchen records securely.</InfoTip></span></div>
       </section>
       <section className="settings-grid">
         <article className="settings-card account-settings-card">
-          <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div><h2>Admin account</h2><p>Change the email or password for this signed-in administrator.</p></div></div>
+          <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Admin account</h2><InfoTip label="About admin account">Change the email or password for this signed-in administrator. Email changes may need confirmation from Supabase; the account keeps its admin permission because its secure user ID does not change.</InfoTip></span></div></div>
           <form className="settings-form account-settings-form" onSubmit={saveAccount}>
             <label className="wide-setting-field"><span><Mail /> Admin email</span><input type="email" value={accountForm.email} onChange={(event) => setAccountForm((current) => ({ ...current, email: event.target.value }))} autoComplete="email" required /></label>
             <label><span><KeyRound /> Current password</span><input type="password" value={accountForm.currentPassword} onChange={(event) => setAccountForm((current) => ({ ...current, currentPassword: event.target.value }))} placeholder="Required to confirm changes" autoComplete="current-password" required /></label>
@@ -1715,11 +1744,10 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
             {accountMessage && <p className={`settings-message ${accountError ? "error" : "success"}`} role="status">{accountMessage}</p>}
             <button className="primary settings-save" disabled={accountBusy}><Save size={17} /> {accountBusy ? "Updating account…" : "Update admin account"}</button>
           </form>
-          <p className="settings-security-note"><ShieldCheck /> Email changes may need confirmation from Supabase. The account keeps its admin permission because its secure user ID does not change.</p>
         </article>
 
         <article className="settings-card payment-settings-card">
-          <div className="settings-title"><span className="settings-icon"><QrCode /></span><div><h2>UPI and payment QR</h2><p>Control the payment details customers receive after ordering.</p></div></div>
+          <div className="settings-title"><span className="settings-icon"><QrCode /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>UPI and payment QR</h2><InfoTip label="About payment settings">Control the payment details customers receive after ordering. QR files are stored privately in Netlify Blobs; the UPI ID also powers tap-to-pay and the automatic QR fallback.</InfoTip></span></div></div>
           <form className="settings-form payment-settings-form" onSubmit={savePayment}>
             <div className="payment-settings-fields">
               <label><span>UPI ID</span><input value={paymentForm.upi_id} onChange={(event) => setPaymentForm((current) => ({ ...current, upi_id: event.target.value }))} placeholder="name@bank" inputMode="email" aria-invalid={paymentForm.upi_id.length > 0 && !upiLooksValid} required />{paymentForm.upi_id.length > 0 && !upiLooksValid && <small className="field-hint error">Use a UPI ID such as krsnasolo@okicici</small>}</label>
@@ -1730,8 +1758,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
                 {(qrPreview || savedQrAvailable) ? <img src={qrPreview || savedQrUrl} alt="Current payment QR preview" /> : <span><QrCode /><small>Automatic QR</small></span>}
               </div>
               <div className="qr-upload-copy">
-                <b>{qrFile ? "New QR ready to save" : savedQrAvailable ? "Custom payment QR active" : "Using automatic UPI QR"}</b>
-                <p>Upload the scanner image exported from GPay, PhonePe or your banking app. JPG, PNG or WebP works best.</p>
+                <span className="compact-info-line"><b>{qrFile ? "New QR ready to save" : savedQrAvailable ? "Custom payment QR active" : "Using automatic UPI QR"}</b><InfoTip label="About QR uploads">Upload the scanner image exported from GPay, PhonePe or your banking app. JPG, PNG or WebP works best.</InfoTip></span>
                 <div className="qr-actions">
                   <label className="upload-qr-button"><Upload size={16} /> {savedQrAvailable ? "Replace QR" : "Upload QR"}<input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={(event) => setQrFile(event.target.files?.[0])} /></label>
                   {(qrFile || savedQrAvailable) && <button type="button" className="remove-qr-button" onClick={() => qrFile ? setQrFile(undefined) : removeQr()} disabled={paymentBusy}><Trash2 size={15} /> {qrFile ? "Cancel" : "Remove"}</button>}
@@ -1741,21 +1768,20 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
             {paymentMessage && <p className={`settings-message ${paymentError ? "error" : "success"}`} role="status">{paymentMessage}</p>}
             <button className="primary settings-save" disabled={paymentBusy || !upiLooksValid}><Save size={17} /> {paymentBusy ? "Saving payment settings…" : "Save payment settings"}</button>
           </form>
-          <p className="settings-security-note"><ShieldCheck /> QR files are stored in Netlify Blobs. The UPI ID remains available for tap-to-pay and as an automatic QR fallback.</p>
         </article>
 
         <article className="settings-card contact-settings-card">
-          <div className="settings-title"><span className="settings-icon whatsapp-settings-icon"><MessageCircle /></span><div><h2>Customer WhatsApp</h2><p>Give customers a quick way to ask about the menu or their order.</p></div></div>
+          <div className="settings-title"><span className="settings-icon whatsapp-settings-icon"><MessageCircle /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Customer WhatsApp</h2><InfoTip label="About customer WhatsApp">Give customers a quick way to ask about the menu or their order. A 10-digit Indian number automatically receives country code +91.</InfoTip></span></div></div>
           <form className="settings-form" onSubmit={saveContact}>
             <label><span>WhatsApp number</span><input type="tel" inputMode="tel" value={contactNumber} onChange={(event) => setContactNumber(event.target.value)} placeholder="+91 98765 43210" /></label>
-            <p className="contact-preview"><MessageCircle /><span><b>{contactNumber.trim() ? "Message us on WhatsApp" : "Button hidden until a number is added"}</b><small>The customer link opens a prefilled chat. A 10-digit Indian number automatically receives country code +91.</small></span></p>
+            <p className="contact-preview"><MessageCircle /><span><b>{contactNumber.trim() ? "Message us on WhatsApp" : "Button hidden until a number is added"}</b></span></p>
             {contactMessage && <p className={`settings-message ${contactError ? "error" : "success"}`} role="status">{contactMessage}</p>}
             <button className="primary settings-save" disabled={contactBusy}><Save size={17} /> {contactBusy ? "Saving contact…" : "Save WhatsApp contact"}</button>
           </form>
         </article>
 
         <article className="settings-card">
-          <div className="settings-title"><span className="settings-icon"><Type /></span><div><h2>Text size</h2><p>This choice stays saved on this phone.</p></div></div>
+          <div className="settings-title"><span className="settings-icon"><Type /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Text size</h2><InfoTip label="About text size">This choice stays saved on this phone.</InfoTip></span></div></div>
           <div className="size-options" role="group" aria-label="Choose text size">
             <button className={!large ? "selected" : ""} onClick={() => onLarge(false)}><span>Aa</span><b>Standard</b><small>More fits on screen</small></button>
             <button className={large ? "selected" : ""} onClick={() => onLarge(true)}><span className="large-sample">Aa</span><b>Large</b><small>Easier to read</small></button>
@@ -1763,7 +1789,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
         </article>
 
         <article className="settings-card">
-          <div className="settings-title"><span className="settings-icon">{dark ? <Moon /> : <Sun />}</span><div><h2>Appearance</h2><p>Choose the look for this phone.</p></div></div>
+          <div className="settings-title"><span className="settings-icon">{dark ? <Moon /> : <Sun />}</span><div className="settings-title-copy"><span className="settings-title-line"><h2>Appearance</h2><InfoTip label="About appearance">Choose the look for this phone.</InfoTip></span></div></div>
           <div className="theme-options" role="group" aria-label="Choose appearance">
             <button className={!dark ? "selected" : ""} onClick={() => onDark(false)}><span className="theme-preview light-preview"><Sun /></span><b>Light</b><small>Bright and clean</small></button>
             <button className={dark ? "selected" : ""} onClick={() => onDark(true)}><span className="theme-preview dark-preview"><Moon /></span><b>Dark</b><small>Comfortable at night</small></button>
@@ -1771,7 +1797,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
         </article>
 
         <article className="settings-card export-card">
-          <div className="settings-title"><span className="settings-icon"><FileSpreadsheet /></span><div><h2>Export order data</h2><p>Choose the dates and prepare either a CSV or a real Excel workbook.</p></div></div>
+          <div className="settings-title"><span className="settings-icon"><FileSpreadsheet /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Export order data</h2><InfoTip label="About exporting orders">Choose the dates and prepare either a CSV or Excel workbook. On phones, Share or save opens the native sheet for Files, WhatsApp, AirDrop and other apps. On supported Mac browsers it opens Save As; other browsers use Downloads without leaving this page.</InfoTip></span></div></div>
           <div className="export-fields">
             <label><span>From</span><input type="date" value={exportOptions.from} onChange={(event) => setExport("from", event.target.value)} /></label>
             <label><span>To</span><input type="date" value={exportOptions.to} onChange={(event) => setExport("to", event.target.value)} /></label>
@@ -1783,28 +1809,25 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
           </div>
           {preparedFile && <div className="prepared-export"><span><b>{preparedFile.name}</b><small>{readableBytes(preparedFile.size)} · ready on this device</small></span><button className="primary" onClick={sharePrepared}><Share2 size={18} /> Share or save</button></div>}
           {exportMessage && <p className={`settings-message ${exportError ? "error" : "success"}`} role="status">{exportMessage}</p>}
-          <p className="settings-help">On iPhone and Android, Share or save opens the phone’s native sheet for Files, WhatsApp, AirDrop and other apps. On supported Mac browsers it opens Save As; other browsers use Downloads without leaving this page.</p>
         </article>
 
         <article className="settings-card storage-card">
-          <div className="settings-title"><span className="settings-icon"><UsersRound /></span><div><h2>Saved customers</h2><p>{customerCount} {customerCount === 1 ? "customer" : "customers"} remembered from past orders.</p></div></div>
-          <p className="settings-help">Start typing a returning customer’s name in a new order. Their flat number and usual delivery person will appear automatically.</p>
+          <div className="settings-title"><span className="settings-icon"><UsersRound /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Saved customers</h2><InfoTip label="About saved customers">Start typing a returning customer’s name in a new order. Their tower, flat number and usual delivery person will appear automatically.</InfoTip></span><strong className="settings-compact-stat">{customerCount} {customerCount === 1 ? "customer" : "customers"} remembered</strong></div></div>
         </article>
 
         <article className="settings-card export-card storage-cleanup-card">
-          <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div><h2>Storage &amp; cleanup</h2><p>Order photos are temporary private thumbnails. Menu photos are kept until you remove or replace them.</p></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
+          <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Storage &amp; cleanup</h2><InfoTip label="About photo storage">Order photos are temporary private thumbnails; menu photos remain until removed or replaced. Photos live in the private Netlify Blobs store. Supabase keeps only an opaque key. New order photos are reduced to a 360 px WebP thumbnail and removed automatically when marked delivered.</InfoTip></span></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
           <div className="storage-summary">
             <span><Camera /><b>{storageSummary?.orders?.count ?? "—"}</b><small>Order photos{storageSummary?.orders ? ` · ${readableBytes(storageSummary.orders.knownBytes)} tracked` : ""}</small></span>
             <span><ChefHat /><b>{storageSummary?.menu?.count ?? "—"}</b><small>Uploaded menu photos{storageSummary?.menu ? ` · ${readableBytes(storageSummary.menu.knownBytes)} tracked` : ""}</small></span>
             <span><FileSpreadsheet /><b>Supabase</b><small>Order text, customers and prices</small></span>
           </div>
-          {storageSummary?.orders && storageSummary?.menu && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <p className="legacy-storage-note">Some older photos predate size tracking, so the displayed bytes cover new uploads only. The photo counts include everything.</p>}
+          {storageSummary?.orders && storageSummary?.menu && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <div className="storage-inline-info"><InfoTip label="About older photo sizes">Some older photos predate size tracking, so displayed bytes cover new uploads only. Photo counts still include everything.</InfoTip><span>Older sizes partly tracked</span></div>}
           <div className="cleanup-groups">
-            <section><b>Photo cleanup</b><p>Safe: removes image files but keeps order and recipe data.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
-            <section className="danger-cleanup"><b>Database history</b><p>Permanent: deletes order records from Supabase. Export first if you need a backup.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-orders")}><Archive /> Delete delivered history</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-orders")}><Trash2 /> Delete all orders</button></div></section>
+            <section><span className="cleanup-title"><b>Photo cleanup</b><InfoTip label="About photo cleanup">Removes image files while keeping order and recipe data.</InfoTip><em>Records stay</em></span><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
+            <section className="danger-cleanup"><span className="cleanup-title"><b>Database history</b><InfoTip label="About deleting history">Permanently deletes order records from Supabase. Export first if you need a backup.</InfoTip><em>Permanent</em></span><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-orders")}><Archive /> Delete delivered history</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-orders")}><Trash2 /> Delete all orders</button></div></section>
           </div>
           {storageMessage && <p className={`settings-message ${storageError ? "error" : "success"}`} role="status">{storageMessage}</p>}
-          <p className="settings-security-note"><ShieldCheck /> Photos live in the private Netlify Blobs store <b>neeru-private-photos</b>. Supabase stores only each photo’s opaque key. New order photos are reduced to a 360 px WebP thumbnail, normally a few tens of KB, and removed automatically when marked delivered.</p>
         </article>
       </section>
       <button className="sign-out-setting" onClick={onSignOut}><CircleUserRound size={19} /> Sign out on this device</button>
