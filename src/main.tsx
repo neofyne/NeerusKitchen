@@ -356,6 +356,12 @@ const starterMenu: MenuItem[] = [
 
 const starterImage = new Map(starterMenu.map((item) => [item.name.toLowerCase(), item.photo_url]));
 starterImage.set("aloo parantha", "/food/aloo-paratha.jpg");
+starterImage.set("plain parantha", "/food/plain-parantha.jpg");
+starterImage.set("green chilli parantha", "/food/green-chilli-parantha.jpg");
+starterImage.set("missa parantha", "/food/missa-parantha.jpg");
+starterImage.set("paneer parantha", "/food/paneer-parantha.jpg");
+starterImage.set("vegetable parantha", "/food/vegetable-parantha.jpg");
+starterImage.set("besan chilla", "/food/besan-chilla.jpg");
 const today = () => {
   const local = new Date();
   local.setMinutes(local.getMinutes() - local.getTimezoneOffset());

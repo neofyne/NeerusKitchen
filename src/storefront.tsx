@@ -101,6 +101,12 @@ const starterImages: Record<string, string> = {
   "Curd rice": "/food/curd-rice.jpg",
   "Aloo paratha": "/food/aloo-paratha.jpg",
   "Aloo Parantha": "/food/aloo-paratha.jpg",
+  "Plain Parantha": "/food/plain-parantha.jpg",
+  "Green Chilli Parantha": "/food/green-chilli-parantha.jpg",
+  "Missa Parantha": "/food/missa-parantha.jpg",
+  "Paneer Parantha": "/food/paneer-parantha.jpg",
+  "Vegetable Parantha": "/food/vegetable-parantha.jpg",
+  "Besan Chilla": "/food/besan-chilla.jpg",
   Poha: "/food/poha.jpg",
 };
 

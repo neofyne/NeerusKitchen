@@ -144,11 +144,11 @@
 .shared-category-intro { max-width: 720px; margin-bottom: 22px; }
 .shared-category-intro h1 { margin: 9px 0 9px; font: 750 clamp(38px, 6vw, 58px)/1 Georgia, serif; letter-spacing: -.045em; }
 .shared-category-intro p { margin: 0; color: var(--store-muted); font-size: 14px; line-height: 1.55; }
-.shared-category-hero { display: grid; grid-template-columns: minmax(280px, .95fr) minmax(0, 1.05fr); gap: 24px; padding: 18px; border: 1px solid #dbe2dc; border-radius: 23px; background: linear-gradient(135deg, #fff9f4, #f0f8f3); box-shadow: 0 18px 46px rgba(30,45,35,.1); }
+.shared-category-hero { width: 100%; min-width: 0; max-width: 100%; display: grid; grid-template-columns: minmax(280px, .95fr) minmax(0, 1.05fr); gap: 24px; padding: 18px; border: 1px solid #dbe2dc; border-radius: 23px; background: linear-gradient(135deg, #fff9f4, #f0f8f3); box-shadow: 0 18px 46px rgba(30,45,35,.1); }
 .shared-category-hero-image { min-height: 300px; display: grid; place-items: center; overflow: hidden; border-radius: 17px; color: #7b877f; background: #e9ede9; }
 .shared-category-hero-image img { width: 100%; height: 100%; object-fit: cover; }
 .shared-category-hero-image svg { width: 58px; }
-.shared-category-hero-copy { align-self: center; padding: 12px 12px 12px 0; }
+.shared-category-hero-copy { min-width: 0; align-self: center; padding: 12px 12px 12px 0; }
 .shared-category-hero-copy > span { color: #b84b26; font-size: 9px; font-weight: 900; letter-spacing: .14em; }
 .shared-category-hero-copy h2 { margin: 8px 0 8px; font: 750 38px/1.02 Georgia, serif; letter-spacing: -.04em; }
 .shared-category-hero-copy > p { margin: 0; color: var(--store-muted); font-size: 13px; line-height: 1.55; }
@@ -157,7 +157,7 @@
 .shared-category-hero-copy small { color: var(--store-muted); font-size: 10px; }
 .shared-category-hero-facts em { padding: 6px 8px; border-radius: 999px; color: #9a431f; background: #fff0e8; font-size: 9px; font-style: normal; font-weight: 820; }
 .shared-category-hero-copy .store-primary { width: fit-content; padding: 0 18px; }
-.shared-category-list { overflow: hidden; margin-top: 18px; border: 1px solid var(--store-line); border-radius: 18px; background: #fff; }
+.shared-category-list { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; margin-top: 18px; border: 1px solid var(--store-line); border-radius: 18px; background: #fff; }
 .shared-category-list-head { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 15px; border-bottom: 1px solid var(--store-line); background: #f7f8f5; }
 .shared-category-list-head b { font-size: 13px; }
 .shared-category-list-head span { color: var(--store-muted); font-size: 9px; font-weight: 750; }
@@ -174,7 +174,7 @@
 .compact-add { min-width: 70px; min-height: 36px; display: flex; align-items: center; justify-content: center; gap: 4px; border: 1px solid #df704b; border-radius: 9px; color: #bd431b; background: #fff7f3; font-size: 10px; font-weight: 850; }
 .compact-add svg { width: 14px; }
 .compact-add:disabled { opacity: .5; }
-.shared-category-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 15px; padding: 12px 14px; border-radius: 13px; color: #6b756e; background: #f2f5f2; font-size: 10px; }
+.shared-category-footer { width: 100%; min-width: 0; max-width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 15px; padding: 12px 14px; border-radius: 13px; color: #6b756e; background: #f2f5f2; font-size: 10px; }
 .shared-category-footer button { min-height: 39px; display: flex; align-items: center; gap: 7px; padding: 0 13px; border-radius: 9px; color: #fff; background: var(--store-green); font-weight: 820; }
 .shared-category-footer svg { width: 16px; }
 .store-bottom-nav { display: none; }
@@ -353,7 +353,7 @@
   .account-button span { display: none; }
   .account-button.sign-in { width: 40px; padding: 0; }
   .account-button.sign-in span { display: none; }
-  .store-main { width: 100%; min-width: 0; max-width: 100%; padding: 0 14px 118px; overflow-x: clip; }
+  .store-main { width: auto; min-width: 0; max-width: 100%; margin: 0; padding: 0 14px 118px; overflow-x: clip; box-sizing: border-box; }
   .shared-dish-page, .shared-category-page { width: 100%; min-width: 0; max-width: 100%; overflow: hidden; }
   .shared-dish-banner { width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr); gap: 17px; margin-top: 16px; padding: 13px; border-radius: 19px; }
   .shared-dish-image { aspect-ratio: 1.55 / 1; border-radius: 14px; }
@@ -397,7 +397,7 @@
   .shared-category-page { padding: 22px 0 36px; }
   .shared-category-intro { margin-bottom: 15px; }
   .shared-category-intro h1 { font-size: 37px; }
-  .shared-category-intro p { font-size: 11px; }
+  .shared-category-intro p { max-width: 100%; overflow-wrap: anywhere; font-size: 11px; }
   .shared-category-hero { grid-template-columns: 1fr; gap: 13px; padding: 11px; border-radius: 18px; }
   .shared-category-hero-image { min-height: 0; aspect-ratio: 1.55 / 1; border-radius: 13px; }
   .shared-category-hero-copy { padding: 5px 4px 6px; }
@@ -412,6 +412,8 @@
   .shared-category-list article > span strong { font-size: 9px; }
   .shared-category-list article > .quantity { grid-template-columns: 25px 19px 25px; }
   .compact-add { min-width: 58px; min-height: 33px; padding: 0 7px; font-size: 9px; }
+  .shared-category-footer { align-items: stretch; flex-direction: column; }
+  .shared-category-footer button { width: 100%; justify-content: center; }
   .store-bottom-nav { position: fixed; z-index: 40; right: 0; bottom: 0; left: 0; height: calc(70px + env(safe-area-inset-bottom)); display: grid; grid-template-columns: repeat(3, 1fr); padding: 7px 14px env(safe-area-inset-bottom); border-top: 1px solid #dfe1da; background: rgba(251,250,247,.97); backdrop-filter: blur(16px); box-shadow: 0 -8px 30px rgba(23,33,27,.07); }
   .store-whatsapp { right: 13px; bottom: calc(82px + env(safe-area-inset-bottom)); min-height: 49px; padding: 6px 12px 6px 7px; border-radius: 15px; box-shadow: 0 12px 30px rgba(19,106,58,.34), inset 0 0 0 1px rgba(255,255,255,.14); }
   .store-whatsapp > svg { width: 29px; height: 29px; flex-basis: 29px; }

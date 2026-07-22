@@ -3,6 +3,12 @@ import type { Config } from "@netlify/functions";
 const starterImages: Record<string, string> = {
   "Aloo Parantha": "/food/aloo-paratha.jpg",
   "Aloo paratha": "/food/aloo-paratha.jpg",
+  "Plain Parantha": "/food/plain-parantha.jpg",
+  "Green Chilli Parantha": "/food/green-chilli-parantha.jpg",
+  "Missa Parantha": "/food/missa-parantha.jpg",
+  "Paneer Parantha": "/food/paneer-parantha.jpg",
+  "Vegetable Parantha": "/food/vegetable-parantha.jpg",
+  "Besan Chilla": "/food/besan-chilla.jpg",
   "Veg sandwich": "/food/veg-sandwich.jpg",
   "Paneer sandwich": "/food/paneer-sandwich.jpg",
 };
