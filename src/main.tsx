@@ -309,6 +309,7 @@ export function AdminApp() {
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
   const [promotingItem, setPromotingItem] = useState<MenuItem | null>(null);
+  const [appUpdateReady, setAppUpdateReady] = useState(false);
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
@@ -349,6 +350,45 @@ export function AdminApp() {
   useEffect(() => {
     localStorage.setItem("neeru-theme", dark ? "dark" : "light");
   }, [dark]);
+
+  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !menuAdding && !menuEditing && !promotingItem && !deletingOrder && !deliveringOrder;
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const currentAsset = Array.from(document.scripts)
+      .map((script) => script.src ? new URL(script.src, window.location.origin).pathname : "")
+      .find((path) => /^\/assets\/main-[^/]+\.js$/.test(path));
+    if (!currentAsset) return;
+    let stopped = false;
+    let checking = false;
+    const checkForUpdate = async () => {
+      if (stopped || checking || document.visibilityState !== "visible") return;
+      checking = true;
+      try {
+        const response = await fetch(`/admin?update-check=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } });
+        if (!response.ok) return;
+        const html = await response.text();
+        const nextAsset = html.match(/src="(\/assets\/main-[^"]+\.js)"/)?.[1];
+        if (!nextAsset || nextAsset === currentAsset) return;
+        if (canApplyAppUpdate) window.location.replace(`/admin?updated=${Date.now()}`);
+        else setAppUpdateReady(true);
+      } catch {
+        // A missed version check is harmless; the next focus or interval retries.
+      } finally {
+        checking = false;
+      }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") void checkForUpdate(); };
+    const timer = window.setInterval(checkForUpdate, 60_000);
+    window.addEventListener("focus", checkForUpdate);
+    document.addEventListener("visibilitychange", onVisible);
+    void checkForUpdate();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkForUpdate);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [canApplyAppUpdate]);
 
   function ensureAlertAudio() {
     if (!alertAudioContext.current) alertAudioContext.current = new AudioContext();
@@ -1078,6 +1118,7 @@ export function AdminApp() {
       </button>}
       <div className={`app-frame ${large ? "large" : ""} ${dark ? "dark" : ""}`}>
         <main className="app">
+          {appUpdateReady && <div className="app-update-banner" role="status"><span><RotateCcw /><b>App update ready</b></span><button onClick={() => window.location.replace(`/admin?updated=${Date.now()}`)}>Update now</button></div>}
           <header className="app-header">
             <button className="brand" onClick={() => openScreen("orders")} aria-label="Open orders">
               <LogoMark />
