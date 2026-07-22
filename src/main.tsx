@@ -207,6 +207,8 @@ async function sharePromotion(prepared: PreparedPromotion) {
   return "WhatsApp opened with the offer and direct order link. The link generates the dish photo preview.";
 }
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const photoApiBase = import.meta.env.DEV ? "https://neerus-kitchen.netlify.app/api/photos" : "/api/photos";
+const photoApiUrl = (query = "") => `${photoApiBase}${query}`;
 
 const starterMenu: MenuItem[] = [
   ["veg-sandwich", "Veg sandwich", 120],
@@ -269,7 +271,7 @@ const shift = (date: string, days: number) => {
 
 async function getPrivatePhotoUrl(path: string, session: Session | null) {
   if (!session) return undefined;
-  const response = await fetch(`/api/photos?key=${encodeURIComponent(path)}`, {
+  const response = await fetch(photoApiUrl(`?key=${encodeURIComponent(path)}`), {
     headers: { Authorization: `Bearer ${session.access_token}` },
   });
   if (!response.ok) return undefined;
@@ -560,7 +562,7 @@ export function AdminApp() {
     const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : photo;
     form.append("photo", preparedPhoto);
     form.append("purpose", purpose);
-    const response = await fetch("/api/photos", {
+    const response = await fetch(photoApiUrl(), {
       method: "POST",
       headers: { Authorization: `Bearer ${session.access_token}` },
       body: form,
@@ -601,13 +603,29 @@ export function AdminApp() {
       remarks: values.remarks || "",
       payment_status: values.is_paid ? "verified" : "pending",
     };
+    let deliveryPhotoDeleted = false;
+    if (editing?.photo_path && record.stage === "delivered") {
+      try {
+        await deletePhotoKeys([editing.photo_path]);
+        deliveryPhotoDeleted = true;
+      } catch (error) {
+        return setNotice(error instanceof Error ? `Order was not marked delivered. ${error.message}` : "Order was not marked delivered because its photo could not be deleted.");
+      }
+    }
     const result = editing
-      ? await supabase.from("orders").update(record).eq("id", editing.id).select("id,stage").maybeSingle()
-      : await supabase.from("orders").insert(record).select("id,stage").maybeSingle();
-    if (result.error || !result.data) setNotice(`Could not save: ${result.error?.message || "the order was not updated"}`);
+      ? await supabase.from("orders").update(record).eq("id", editing.id).select("id,stage,photo_path").maybeSingle()
+      : await supabase.from("orders").insert(record).select("id,stage,photo_path").maybeSingle();
+    if (result.error || !result.data) {
+      if (deliveryPhotoDeleted && editing) await supabase.from("orders").update({ photo_path: null }).eq("id", editing.id);
+      setNotice(`Could not save: ${result.error?.message || "the order was not updated"}${deliveryPhotoDeleted ? ". The temporary photo was still removed safely." : ""}`);
+    }
     else {
-      if (editing?.photo_path && photoPath !== editing.photo_path) {
-        await deletePhotoKeys([editing.photo_path]).catch(() => undefined);
+      if (editing?.photo_path && photoPath !== editing.photo_path && record.stage !== "delivered") {
+        try {
+          await deletePhotoKeys([editing.photo_path]);
+        } catch {
+          setNotice("Order saved, but the replaced photo still needs cleanup from Settings → Storage & cleanup.");
+        }
       }
       setAdding(false);
       setEditing(null);
@@ -665,19 +683,20 @@ export function AdminApp() {
 
   async function deletePhotoKeys(keys: string[]) {
     if (!session || keys.length === 0) return 0;
-    const response = await fetch("/api/photos", {
+    const response = await fetch(photoApiUrl(), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ keys }),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || "Could not remove stored photos.");
+    if (result.verified !== true) throw new Error("The server did not verify that the photo was deleted.");
     return Number(result.removed || 0);
   }
 
   async function loadStorageSummary(): Promise<StorageSummary> {
     if (!session) throw new Error("Please sign in again to check storage.");
-    const response = await fetch("/api/photos?summary=1", { headers: { Authorization: `Bearer ${session.access_token}` }, cache: "no-store" });
+    const response = await fetch(photoApiUrl("?summary=1"), { headers: { Authorization: `Bearer ${session.access_token}` }, cache: "no-store" });
     const result = await response.json().catch(() => null) as (StorageSummary & { error?: string }) | null;
     if (!response.ok) throw new Error(result?.error || "Could not check photo storage.");
     if (!result?.orders || !result.menu || !result.payment) {
@@ -856,7 +875,7 @@ export function AdminApp() {
 
   async function removePaymentQr() {
     if (!session) throw new Error("Please sign in again before removing the QR code.");
-    const response = await fetch("/api/photos?key=payment/current", {
+    const response = await fetch(photoApiUrl("?key=payment/current"), {
       method: "DELETE",
       headers: { Authorization: `Bearer ${session.access_token}` },
     });
@@ -911,32 +930,46 @@ export function AdminApp() {
   async function updateOrder(id: string, changes: Partial<Order>) {
     if (!supabase) return;
     const currentOrder = orders.find((order) => order.id === id);
-    const record = changes.is_paid === undefined
-      ? changes
-      : { ...changes, payment_status: changes.is_paid ? "verified" : "pending" };
+    const isDelivering = changes.stage === "delivered";
+    let deliveryPhotoDeleted = false;
+    if (isDelivering && currentOrder?.photo_path) {
+      try {
+        await deletePhotoKeys([currentOrder.photo_path]);
+        deliveryPhotoDeleted = true;
+      } catch (error) {
+        setNotice(error instanceof Error ? `Not marked delivered. ${error.message}` : "Not marked delivered because its photo could not be deleted.");
+        return;
+      }
+    }
+    const deliveryChanges = isDelivering ? { ...changes, photo_path: null } : changes;
+    const record = deliveryChanges.is_paid === undefined
+      ? deliveryChanges
+      : { ...deliveryChanges, payment_status: deliveryChanges.is_paid ? "verified" : "pending" };
     const { data, error } = await supabase.from("orders").update(record).eq("id", id).select("id,stage,is_paid,payment_status,photo_path").maybeSingle();
-    if (error || !data) setNotice(`Could not update: ${error?.message || "the order was not changed"}`);
+    if (error || !data) {
+      if (deliveryPhotoDeleted) await supabase.from("orders").update({ photo_path: null }).eq("id", id);
+      setNotice(`Could not update: ${error?.message || "the order was not changed"}${deliveryPhotoDeleted ? ". The temporary photo was still removed safely." : ""}`);
+    }
     else {
       setOrders((current) => current.map((order) => order.id === id ? { ...order, ...record, stage: normalizeStage(data.stage) } as Order : order));
-      if (changes.stage === "delivered" && currentOrder?.photo_path) {
-        try {
-          await deletePhotoKeys([currentOrder.photo_path]);
-          await supabase.from("orders").update({ photo_path: null }).eq("id", id);
-          setNotice("Marked delivered. Its temporary order photo was removed automatically.");
-        } catch {
-          setNotice("Marked delivered. Photo cleanup can be retried from Settings → Storage & cleanup.");
-        }
-      }
+      if (isDelivering) setNotice(currentOrder?.photo_path ? "Marked delivered. The temporary photo was deleted and verified first." : "Marked delivered. No temporary photo was attached.");
       loadOrders();
     }
   }
   async function deleteOrder(id: string) {
     if (!supabase || !confirm("Delete this order?")) return;
     const currentOrder = orders.find((order) => order.id === id);
+    if (currentOrder?.photo_path) {
+      try {
+        await deletePhotoKeys([currentOrder.photo_path]);
+      } catch (error) {
+        setNotice(error instanceof Error ? `Order was not deleted. ${error.message}` : "Order was not deleted because its photo could not be removed.");
+        return;
+      }
+    }
     const { error } = await supabase.from("orders").delete().eq("id", id);
     if (error) setNotice(`Could not delete: ${error.message}`);
     else {
-      if (currentOrder?.photo_path) await deletePhotoKeys([currentOrder.photo_path]).catch(() => undefined);
       setEditing(null);
       loadOrders();
     }
@@ -1513,14 +1546,14 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   useEffect(() => {
     const controller = new AbortController();
     setSavedQrAvailable(false);
-    fetch(`/api/photos?key=payment/current&v=${qrRevision}`, { cache: "no-store", signal: controller.signal })
+    fetch(photoApiUrl(`?key=payment/current&v=${qrRevision}`), { cache: "no-store", signal: controller.signal })
       .then((response) => setSavedQrAvailable(response.ok && Boolean(response.headers.get("content-type")?.startsWith("image/"))))
       .catch(() => setSavedQrAvailable(false));
     return () => controller.abort();
   }, [qrRevision]);
 
   const upiLooksValid = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(paymentForm.upi_id.trim());
-  const savedQrUrl = `/api/photos?key=payment/current&v=${qrRevision}`;
+  const savedQrUrl = photoApiUrl(`?key=payment/current&v=${qrRevision}`);
 
   async function refreshStorage() {
     setStorageBusy("refresh");
