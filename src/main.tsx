@@ -123,6 +123,7 @@ const stages: { key: Stage; label: string; badge: string; short: string; color: 
   { key: "delivered", label: "Delivered", badge: "Delivered", short: "Delivered", color: "green" },
 ];
 const normalizeStage = (value?: string): Stage => value === "delivered" ? "delivered" : "new";
+const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 const starterMenu: MenuItem[] = [
   ["veg-sandwich", "Veg sandwich", 120],
@@ -766,14 +767,14 @@ export function AdminApp() {
   }
   return (
     <div className={`workspace ${phonePreview ? "preview-mode" : ""}`}>
-      <button
+      {showLocalDevicePreview && <button
         className="device-switch"
         onClick={() => setPhonePreview(!phonePreview)}
         aria-pressed={phonePreview}
       >
         <Smartphone size={18} />
         {phonePreview ? "Exit phone preview" : "Preview on phone"}
-      </button>
+      </button>}
       <div className={`app-frame ${large ? "large" : ""} ${dark ? "dark" : ""}`}>
         <main className="app">
           <header className="app-header">

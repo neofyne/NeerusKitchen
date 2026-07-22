@@ -108,6 +108,7 @@ const stageLabels: Record<string, string> = {
   delivered: "Delivered",
 };
 const customerStage = (stage: string) => stage === "delivered" ? "delivered" : "new";
+const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 const defaultSettings: StoreSettings = {
   ordering_open: true,
@@ -284,9 +285,9 @@ export function Storefront() {
 
   return (
     <div className={`storefront-workspace ${phonePreview ? "storefront-preview" : ""}`}>
-      <button className="store-device-switch" onClick={() => setPhonePreview((current) => !current)} aria-pressed={phonePreview}>
+      {showLocalDevicePreview && <button className="store-device-switch" onClick={() => setPhonePreview((current) => !current)} aria-pressed={phonePreview}>
         <Smartphone />{phonePreview ? "Exit phone preview" : "Preview on phone"}
-      </button>
+      </button>}
       <div className="storefront">
       <header className="store-header">
         <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Home Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
