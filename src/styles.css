@@ -234,6 +234,7 @@ img { display: block; max-width: 100%; }
 .card-footer button { min-height: 26px; display: flex; align-items: center; gap: 2px; border-radius: 7px; font-size: 9px; font-weight: 800; }
 .edit-order { color: #69746d; }
 .move-order { padding: 0 7px; color: #a44320; background: var(--brand-soft); }
+.restore-order { color: #246b49; background: #eaf6ef; }
 
 .order-list { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #fff; }
 .order-row { min-height: 60px; display: grid; grid-template-columns: 28px 40px minmax(180px, 1.5fr) .55fr .55fr .8fr .6fr; gap: 9px; align-items: center; padding: 7px 11px; border-bottom: 1px solid #e4eae6; cursor: pointer; }

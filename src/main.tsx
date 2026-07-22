@@ -1115,7 +1115,9 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
           <button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit details</button>
-          {canDeliver && <button className="move-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "delivered" }); }}>Mark delivered<Check size={16} /></button>}
+          {canDeliver
+            ? <button className="move-order" onClick={(e) => { e.stopPropagation(); if (confirm(`Mark ${order.customer_name}'s order as delivered?`)) onUpdate(order.id, { stage: "delivered" }); }}>Mark delivered<Check size={16} /></button>
+            : <button className="move-order restore-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "new" }); }}>Back to Orders<RotateCcw size={15} /></button>}
         </div>
       </div>
     </article>
@@ -1556,12 +1558,14 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   const initialFlat = splitAdminFlat(draft.flat_number);
   const [flatWing, setFlatWing] = useState<BuildingWing>(initialFlat.wing);
   const [flatDigits, setFlatDigits] = useState(initialFlat.number);
+  const [allowNoWing, setAllowNoWing] = useState(Boolean(initialFlat.number && !initialFlat.wing && "id" in draft));
   const [flatWarning, setFlatWarning] = useState("");
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setForm((v) => ({ ...v, [key]: value }));
   const setCustomerFlat = (flatNumber: string) => {
     const parsed = splitAdminFlat(flatNumber);
     setFlatWing(parsed.wing);
     setFlatDigits(parsed.number);
+    setAllowNoWing(Boolean(parsed.number && !parsed.wing));
     setFlatWarning("");
   };
   const updateFlatNumber = (value: string) => {
@@ -1572,6 +1576,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   };
   const updateFlatWing = (wing: BuildingWing) => {
     setFlatWing(wing);
+    if (wing) setAllowNoWing(false);
     setFlatWarning("");
     set("flat_number", wing && flatDigits ? `${wing}-${flatDigits}` : "");
   };
@@ -1597,12 +1602,12 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   };
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if (!flatWing || !flatDigits) { setFlatWarning(!flatWing ? "Choose the building wing." : "Enter the flat number."); return; } onSave({ ...form, flat_number: `${flatWing}-${flatDigits}` }, photo); }}>
+      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if ((!flatWing && !allowNoWing) || !flatDigits) { setFlatWarning(!flatWing ? "Choose the building wing." : "Enter the flat number."); return; } onSave({ ...form, flat_number: flatWing ? `${flatWing}-${flatDigits}` : flatDigits }, photo); }}>
         <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{"id" in draft ? "Edit order" : "New order"}</h2><p>Customer, food and delivery details</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
         <div className="form-grid">
           <CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
           <div className={`admin-flat-fields ${flatWarning ? "has-warning" : ""}`}>
-            <label><span>Wing</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Wing {wing}</option>)}</select></label>
+            <label><span>Wing</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required={!allowNoWing}><option value="" disabled={!allowNoWing}>{allowNoWing ? "No wing (existing)" : "Choose"}</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Wing {wing}</option>)}</select></label>
             <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
             {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
           </div>
