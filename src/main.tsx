@@ -14,6 +14,7 @@ import {
   CircleUserRound,
   Clock3,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   HardDrive,
   IndianRupee,
@@ -88,6 +89,8 @@ type MenuItem = {
     is_featured: boolean;
     portions_available: number | null;
     special_price: number | null;
+    promotion_message: string;
+    promotion_until: string | null;
   };
 };
 type CustomerProfile = {
@@ -113,6 +116,8 @@ type ExportFormat = "csv" | "xlsx";
 type StorageSection = { count: number; knownBytes: number; unknownSizes: number };
 type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: StorageSection };
 type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
+type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string };
+type PreparedPromotion = { title: string; text: string; url: string; image?: File };
 type AdminStoreSettings = {
   ordering_open: boolean;
   hero_message: string;
@@ -188,6 +193,18 @@ async function shareOrSaveFile(file: File) {
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   return `Downloaded ${file.name}. This browser does not provide a native share sheet.`;
+}
+
+async function sharePromotion(prepared: PreparedPromotion) {
+  const data: ShareData = { title: prepared.title, text: `${prepared.text}\n\nOrder here: ${prepared.url}`, url: prepared.url };
+  if (prepared.image) data.files = [prepared.image];
+  const shareNavigator = navigator as Navigator & { canShare?: (value: ShareData) => boolean };
+  if (shareNavigator.share && (!data.files || !shareNavigator.canShare || shareNavigator.canShare(data))) {
+    await shareNavigator.share(data);
+    return "Share sheet opened. Choose WhatsApp and the dish photo, offer and order link will be ready.";
+  }
+  window.open(`https://wa.me/?text=${encodeURIComponent(`${prepared.text}\n\nOrder here: ${prepared.url}`)}`, "_blank", "noopener,noreferrer");
+  return "WhatsApp opened with the offer and direct order link. The link generates the dish photo preview.";
 }
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
@@ -282,6 +299,7 @@ export function AdminApp() {
   const [adding, setAdding] = useState(false);
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
+  const [promotingItem, setPromotingItem] = useState<MenuItem | null>(null);
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
@@ -394,7 +412,7 @@ export function AdminApp() {
     if (!supabase || !session) return;
     const [{ data, error }, { data: daily }, { data: configuration }] = await Promise.all([
       supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
-      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", today()),
+      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", today()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
     ]);
     if (error || !data?.length) return;
@@ -402,7 +420,7 @@ export function AdminApp() {
     const resolved = await Promise.all(
       (data as MenuItem[]).map(async (item) => {
         const todayEntry = dailyMap.get(item.id);
-        const withDaily = { ...item, daily: { is_available: item.is_active && (todayEntry?.is_available ?? true), is_featured: Boolean(todayEntry?.is_featured), portions_available: todayEntry?.portions_available ?? null, special_price: todayEntry?.special_price ?? null } };
+        const withDaily = { ...item, daily: { is_available: item.is_active && (todayEntry?.is_available ?? true), is_featured: Boolean(todayEntry?.is_featured), portions_available: todayEntry?.portions_available ?? null, special_price: todayEntry?.special_price ?? null, promotion_message: todayEntry?.promotion_message ?? "", promotion_until: todayEntry?.promotion_until?.slice(0, 5) ?? null } };
         if (!item.photo_path) {
           return { ...withDaily, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
         }
@@ -570,16 +588,23 @@ export function AdminApp() {
       }
     }
     const record = {
-      ...values,
+      order_date: values.order_date,
+      customer_name: values.customer_name.trim(),
+      flat_number: values.flat_number,
+      order_details: values.order_details.trim(),
       photo_path: photoPath,
       amount: Number(values.amount),
       delivery_time: values.delivery_time || null,
+      delivered_by: values.delivered_by,
+      is_paid: values.is_paid,
+      stage: normalizeStage(values.stage),
+      remarks: values.remarks || "",
       payment_status: values.is_paid ? "verified" : "pending",
     };
     const result = editing
-      ? await supabase.from("orders").update(record).eq("id", editing.id)
-      : await supabase.from("orders").insert(record);
-    if (result.error) setNotice(`Could not save: ${result.error.message}`);
+      ? await supabase.from("orders").update(record).eq("id", editing.id).select("id,stage").maybeSingle()
+      : await supabase.from("orders").insert(record).select("id,stage").maybeSingle();
+    if (result.error || !result.data) setNotice(`Could not save: ${result.error?.message || "the order was not updated"}`);
     else {
       if (editing?.photo_path && photoPath !== editing.photo_path) {
         await deletePhotoKeys([editing.photo_path]).catch(() => undefined);
@@ -653,9 +678,12 @@ export function AdminApp() {
   async function loadStorageSummary(): Promise<StorageSummary> {
     if (!session) throw new Error("Please sign in again to check storage.");
     const response = await fetch("/api/photos?summary=1", { headers: { Authorization: `Bearer ${session.access_token}` }, cache: "no-store" });
-    const result = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(result.error || "Could not check photo storage.");
-    return result as StorageSummary;
+    const result = await response.json().catch(() => null) as (StorageSummary & { error?: string }) | null;
+    if (!response.ok) throw new Error(result?.error || "Could not check photo storage.");
+    if (!result?.orders || !result.menu || !result.payment) {
+      throw new Error(import.meta.env.DEV ? "Photo storage totals are available on the Netlify-hosted app. All other settings still work here." : "Storage totals are temporarily unavailable.");
+    }
+    return result;
   }
 
   async function cleanupData(action: CleanupAction) {
@@ -737,9 +765,46 @@ export function AdminApp() {
 
   async function updateDailyMenu(item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) {
     if (!supabase) return;
-    const daily = { is_available: true, is_featured: false, portions_available: null, special_price: null, ...item.daily, ...changes };
+    const daily = { is_available: true, is_featured: false, portions_available: null, special_price: null, promotion_message: "", promotion_until: null, ...item.daily, ...changes };
     const { error } = await supabase.from("daily_menu").upsert({ menu_item_id: item.id, menu_date: today(), ...daily }, { onConflict: "menu_item_id,menu_date" });
     if (error) setNotice(`Could not update today's menu: ${error.message}`); else loadMenu();
+  }
+
+  async function prepareDishPromotion(item: MenuItem, values: PromotionValues): Promise<PreparedPromotion> {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const daily = {
+      menu_item_id: item.id,
+      menu_date: today(),
+      is_available: true,
+      is_featured: true,
+      portions_available: values.portions,
+      special_price: values.specialPrice,
+      promotion_message: values.message.trim(),
+      promotion_until: values.until || null,
+    };
+    const { error } = await supabase.from("daily_menu").upsert(daily, { onConflict: "menu_item_id,menu_date" });
+    if (error) throw new Error(`Could not save today’s promotion: ${error.message}`);
+    const price = Number(values.specialPrice ?? item.price);
+    const lines = [`🍲 *${item.name}*`, values.message.trim() || item.description || "Freshly prepared at Neeru’s Home Kitchen.", `Today: ${money(price)}`];
+    if (values.specialPrice !== null && Number(values.specialPrice) < Number(item.price)) lines.push(`Regular price: ${money(item.price)}`);
+    if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
+    if (values.until) lines.push(`Order before ${values.until}`);
+    const url = `${window.location.origin}/share/dish?id=${encodeURIComponent(item.id)}`;
+    let imageFile: File | undefined;
+    if (item.photo_url) {
+      try {
+        const response = await fetch(item.photo_url);
+        if (response.ok) {
+          const blob = await response.blob();
+          const extension = blob.type.includes("png") ? "png" : blob.type.includes("webp") ? "webp" : "jpg";
+          imageFile = new File([blob], `${item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.${extension}`, { type: blob.type || "image/jpeg" });
+        }
+      } catch {
+        imageFile = undefined;
+      }
+    }
+    await loadMenu();
+    return { title: `${item.name} from Neeru’s Home Kitchen`, text: lines.join("\n"), url, image: imageFile };
   }
 
   async function setAllDailyMenu(isAvailable: boolean) {
@@ -752,7 +817,7 @@ export function AdminApp() {
 
   async function repeatYesterdayMenu() {
     if (!supabase) return;
-    const { data, error } = await supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", shift(today(), -1));
+    const { data, error } = await supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", shift(today(), -1));
     if (error) return setNotice(`Could not load yesterday's menu: ${error.message}`);
     if (!data?.length) return setNotice("Yesterday has no saved customer menu to repeat.");
     const rows = data.map((entry) => ({ ...entry, menu_date: today() }));
@@ -849,9 +914,10 @@ export function AdminApp() {
     const record = changes.is_paid === undefined
       ? changes
       : { ...changes, payment_status: changes.is_paid ? "verified" : "pending" };
-    const { error } = await supabase.from("orders").update(record).eq("id", id);
-    if (error) setNotice(`Could not update: ${error.message}`);
+    const { data, error } = await supabase.from("orders").update(record).eq("id", id).select("id,stage,is_paid,payment_status,photo_path").maybeSingle();
+    if (error || !data) setNotice(`Could not update: ${error?.message || "the order was not changed"}`);
     else {
+      setOrders((current) => current.map((order) => order.id === id ? { ...order, ...record, stage: normalizeStage(data.stage) } as Order : order));
       if (changes.stage === "delivered" && currentOrder?.photo_path) {
         try {
           await deletePhotoKeys([currentOrder.photo_path]);
@@ -879,6 +945,11 @@ export function AdminApp() {
   const openNewOrder = () => {
     setEditing(null);
     setAdding(true);
+  };
+  const openExistingOrder = (order: Order) => {
+    sessionStorage.removeItem("neeru-prefill");
+    setAdding(false);
+    setEditing(order);
   };
   const openScreen = (next: Screen) => {
     setNotificationsOpen(false);
@@ -1040,20 +1111,19 @@ export function AdminApp() {
               ) : filtered.length === 0 ? (
                 <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
-                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={setEditing} onUpdate={updateOrder} />
+                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} />
               ) : (
-                <OrderList orders={filtered} menuItems={menuItems} onEdit={setEditing} onUpdate={updateOrder} />
+                <OrderList orders={filtered} menuItems={menuItems} onEdit={openExistingOrder} onUpdate={updateOrder} />
               )}
             </>
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onToggleArchive={toggleMenuItem} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
               dark={dark}
               selectedDate={selectedDate}
               customerCount={customers.length}
-              accessRequests={accessRequests}
               adminEmail={session?.user.email || ""}
               paymentSettings={storeSettings}
               whatsappNumber={storeSettings.whatsapp_number}
@@ -1065,7 +1135,6 @@ export function AdminApp() {
               onSavePayment={savePaymentSettings}
               onRemovePaymentQr={removePaymentQr}
               onSaveCustomerContact={saveCustomerContact}
-              onReviewCustomerAccess={reviewCustomerAccess}
               onUpdateAccount={updateAdminAccount}
               onSignOut={() => supabase?.auth.signOut()}
             />
@@ -1090,6 +1159,7 @@ export function AdminApp() {
           />
         )}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
+        {promotingItem && <PromotionModal item={promotingItem} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
       </div>
     </div>
   );
@@ -1125,7 +1195,7 @@ function AdminNotificationCenter({ open, count, accessRequests, orders, soundEna
             </div>
           </div>
           <div className="notification-scroll">
-            {!count && <div className="notification-empty"><Check /><b>Nothing needs attention</b><span>New customer signups and online orders will appear here.</span></div>}
+            {!count && <div className="notification-empty"><Check /><b>Nothing needs attention</b><span>New online orders will appear here.</span></div>}
             {accessRequests.length > 0 && <div className="notification-group">
               <div className="notification-group-title"><span><UsersRound /> Customer approvals</span><b>{accessRequests.length}</b></div>
               {accessRequests.map((request) => {
@@ -1147,7 +1217,7 @@ function AdminNotificationCenter({ open, count, accessRequests, orders, soundEna
               </button>)}
             </div>}
           </div>
-          <button className="notification-manage" onClick={onManageApprovals}><Settings2 /> Open approval settings</button>
+          <button className="notification-manage" onClick={onManageApprovals}><Settings2 /> Open settings</button>
         </section>
       )}
     </div>
@@ -1318,7 +1388,7 @@ function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; m
   })}</div>;
 }
 
-function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, onToggleArchive, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
+function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
   const [form, setForm] = useState(settings);
   const [upiQr, setUpiQr] = useState("");
   useEffect(() => setForm(settings), [settings]);
@@ -1351,9 +1421,9 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
       </section>
       <div className="daily-menu-toolbar"><div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>{shownCount} shown · {featuredCount} featured · {items.length - activeItems.length} archived</small></div><div className="daily-menu-actions"><button onClick={onRepeatYesterday}><RotateCcw size={14} /> Repeat yesterday</button><button onClick={onShowAll}><Check size={14} /> Show all</button><button onClick={onHideAll}><X size={14} /> Clear today</button></div></div>
       <section className="menu-grid">
-        {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} key={item.id}>
+        {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} data-menu-id={item.id} key={item.id}>
           <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
-          <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} regular` : money(item.price)}</span></div><div className="menu-card-actions"><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
+          <div className="menu-copy"><div><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} regular` : money(item.price)}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
           {item.description && <p className="menu-description">{item.description}</p>}
           <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} disabled={!item.is_active} onClick={() => onDaily(item, { is_available: !item.daily?.is_available, is_featured: item.daily?.is_available ? false : item.daily?.is_featured })}><Check size={14} /> {item.daily?.is_available ? "Shown" : "Hidden"}</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.is_active || !item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Today’s price</span><input type="number" min="0" placeholder={String(item.price)} disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.special_price ?? ""} onChange={(event) => onDaily(item, { special_price: event.target.value === "" ? null : Number(event.target.value) })} /></label><label><span>Portions</span><input type="number" min="0" placeholder="∞" disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
@@ -1365,12 +1435,11 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, accessRequests, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onReviewCustomerAccess, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
   customerCount: number;
-  accessRequests: CustomerAccessRequest[];
   adminEmail: string;
   paymentSettings: AdminStoreSettings;
   whatsappNumber: string;
@@ -1382,7 +1451,6 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
   onRemovePaymentQr: () => Promise<void>;
   onSaveCustomerContact: (whatsappNumber: string) => Promise<void>;
-  onReviewCustomerAccess: (customerId: string, approve: boolean) => Promise<void>;
   onUpdateAccount: (values: AdminAccountUpdate) => Promise<string>;
   onSignOut: () => void;
 }) {
@@ -1404,9 +1472,6 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
   const [contactBusy, setContactBusy] = useState(false);
   const [contactMessage, setContactMessage] = useState("");
   const [contactError, setContactError] = useState(false);
-  const [reviewingId, setReviewingId] = useState("");
-  const [accessMessage, setAccessMessage] = useState("");
-  const [accessError, setAccessError] = useState(false);
   const [exportBusy, setExportBusy] = useState<ExportFormat | "">("");
   const [preparedFile, setPreparedFile] = useState<File | null>(null);
   const [exportMessage, setExportMessage] = useState("");
@@ -1601,41 +1666,12 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
     }
   }
 
-  async function reviewAccess(request: CustomerAccessRequest, approve: boolean) {
-    if (!approve && !confirm(`Decline access for ${request.full_name || request.phone}?`)) return;
-    setReviewingId(request.id);
-    setAccessMessage("");
-    setAccessError(false);
-    try {
-      await onReviewCustomerAccess(request.id, approve);
-      setAccessMessage(approve ? `${request.full_name || "Customer"} can now sign in.` : "Access request declined.");
-    } catch (error) {
-      setAccessError(true);
-      setAccessMessage(error instanceof Error ? error.message : "Could not review this request.");
-    } finally {
-      setReviewingId("");
-    }
-  }
-
   return (
     <>
       <section className="page-heading settings-heading">
-        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><h1>Settings</h1><p>Manage access, payments, appearance and kitchen records securely.</p></div>
+        <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><h1>Settings</h1><p>Manage payments, appearance, exports and kitchen records securely.</p></div>
       </section>
       <section className="settings-grid">
-        <article className="settings-card access-requests-card">
-          <div className="settings-title"><span className="settings-icon"><UsersRound /></span><div><h2>Customer access requests</h2><p>Approve known residents before they can sign in and place orders.</p></div><b className="request-count">{accessRequests.length}</b></div>
-          {accessRequests.length ? <div className="access-request-list">{accessRequests.map((request) => {
-            const digits = request.phone.replace(/\D/g, "");
-            const shownPhone = digits.length === 12 && digits.startsWith("91") ? `+91 ${digits.slice(2, 7)} ${digits.slice(7)}` : request.phone;
-            return <div className="access-request" key={request.id}>
-              <span><b>{request.full_name || "Unnamed customer"}</b><small>Flat {request.flat_number || "not added"} · {shownPhone || "No phone"}</small></span>
-              <div><button type="button" className="approve-access" disabled={Boolean(reviewingId)} onClick={() => reviewAccess(request, true)}><Check /> Approve</button><button type="button" className="reject-access" disabled={Boolean(reviewingId)} onClick={() => reviewAccess(request, false)}><X /> Decline</button></div>
-            </div>;
-          })}</div> : <p className="access-empty"><Check /> No customer requests are waiting.</p>}
-          {accessMessage && <p className={`settings-message ${accessError ? "error" : "success"}`} role="status">{accessMessage}</p>}
-        </article>
-
         <article className="settings-card account-settings-card">
           <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div><h2>Admin account</h2><p>Change the email or password for this signed-in administrator.</p></div></div>
           <form className="settings-form account-settings-form" onSubmit={saveAccount}>
@@ -1725,11 +1761,11 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
         <article className="settings-card export-card storage-cleanup-card">
           <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div><h2>Storage &amp; cleanup</h2><p>Order photos are temporary private thumbnails. Menu photos are kept until you remove or replace them.</p></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
           <div className="storage-summary">
-            <span><Camera /><b>{storageSummary?.orders.count ?? "—"}</b><small>Order photos{storageSummary ? ` · ${readableBytes(storageSummary.orders.knownBytes)} tracked` : ""}</small></span>
-            <span><ChefHat /><b>{storageSummary?.menu.count ?? "—"}</b><small>Uploaded menu photos{storageSummary ? ` · ${readableBytes(storageSummary.menu.knownBytes)} tracked` : ""}</small></span>
+            <span><Camera /><b>{storageSummary?.orders?.count ?? "—"}</b><small>Order photos{storageSummary?.orders ? ` · ${readableBytes(storageSummary.orders.knownBytes)} tracked` : ""}</small></span>
+            <span><ChefHat /><b>{storageSummary?.menu?.count ?? "—"}</b><small>Uploaded menu photos{storageSummary?.menu ? ` · ${readableBytes(storageSummary.menu.knownBytes)} tracked` : ""}</small></span>
             <span><FileSpreadsheet /><b>Supabase</b><small>Order text, customers and prices</small></span>
           </div>
-          {storageSummary && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <p className="legacy-storage-note">Some older photos predate size tracking, so the displayed bytes cover new uploads only. The photo counts include everything.</p>}
+          {storageSummary?.orders && storageSummary?.menu && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <p className="legacy-storage-note">Some older photos predate size tracking, so the displayed bytes cover new uploads only. The photo counts include everything.</p>}
           <div className="cleanup-groups">
             <section><b>Photo cleanup</b><p>Safe: removes image files but keeps order and recipe data.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
             <section className="danger-cleanup"><b>Database history</b><p>Permanent: deletes order records from Supabase. Export first if you need a backup.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-orders")}><Archive /> Delete delivered history</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-orders")}><Trash2 /> Delete all orders</button></div></section>
@@ -1854,12 +1890,12 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   };
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if ((!flatWing && !allowNoWing) || !flatDigits) { setFlatWarning(!flatWing ? "Choose the building wing." : "Enter the flat number."); return; } onSave({ ...form, flat_number: flatWing ? `${flatWing}-${flatDigits}` : flatDigits }, photo); }}>
+      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if ((!flatWing && !allowNoWing) || !flatDigits) { setFlatWarning(!flatWing ? "Choose the tower." : "Enter the flat number."); return; } onSave({ ...form, flat_number: flatWing ? `${flatWing}-${flatDigits}` : flatDigits }, photo); }}>
         <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{"id" in draft ? "Edit order" : "New order"}</h2><p>Customer, food and delivery details</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
         <div className="form-grid">
           <CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
           <div className={`admin-flat-fields ${flatWarning ? "has-warning" : ""}`}>
-            <label><span>Wing</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required={!allowNoWing}><option value="" disabled={!allowNoWing}>{allowNoWing ? "No wing (existing)" : "Choose"}</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Wing {wing}</option>)}</select></label>
+            <label><span>Tower</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required={!allowNoWing}><option value="" disabled={!allowNoWing}>{allowNoWing ? "No tower (existing)" : "Choose"}</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Tower {wing}</option>)}</select></label>
             <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
             {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
           </div>
@@ -1879,6 +1915,72 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
       </form>
     </div>
   );
+}
+
+function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose: () => void; onPrepare: (item: MenuItem, values: PromotionValues) => Promise<PreparedPromotion> }) {
+  const [message, setMessage] = useState(item.daily?.promotion_message || `Today’s special: ${item.name}, freshly prepared in our home kitchen.`);
+  const [specialPrice, setSpecialPrice] = useState<string>(item.daily?.special_price === null || item.daily?.special_price === undefined ? "" : String(item.daily.special_price));
+  const [portions, setPortions] = useState<string>(item.daily?.portions_available === null || item.daily?.portions_available === undefined ? "" : String(item.daily.portions_available));
+  const [until, setUntil] = useState(item.daily?.promotion_until || "");
+  const [prepared, setPrepared] = useState<PreparedPromotion | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [error, setError] = useState(false);
+
+  async function prepare() {
+    const parsedPrice = specialPrice === "" ? null : Number(specialPrice);
+    const parsedPortions = portions === "" ? null : Number(portions);
+    if ((parsedPrice !== null && (!Number.isFinite(parsedPrice) || parsedPrice < 0)) || (parsedPortions !== null && (!Number.isInteger(parsedPortions) || parsedPortions < 0))) {
+      setError(true);
+      setFeedback("Use a valid positive price and a whole number for portions.");
+      return;
+    }
+    setBusy(true);
+    setError(false);
+    setFeedback("");
+    try {
+      const result = await onPrepare(item, {
+        message,
+        specialPrice: parsedPrice,
+        portions: parsedPortions,
+        until,
+      });
+      setPrepared(result);
+      setFeedback("Today’s offer is live. Share it directly from here—there is no need to open the customer storefront.");
+    } catch (reason) {
+      setError(true);
+      setFeedback(reason instanceof Error ? reason.message : "Could not prepare this promotion.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function share() {
+    if (!prepared) return;
+    setError(false);
+    try {
+      setFeedback(await sharePromotion(prepared));
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setError(true);
+      setFeedback(reason instanceof Error ? reason.message : "Could not open the share sheet.");
+    }
+  }
+
+  return <div className="modal-bg" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal promotion-modal">
+    <div className="modal-head"><div><span className="eyebrow">WHATSAPP PROMOTION</span><h2>Promote {item.name}</h2><p>Set today’s offer, then send the photo and direct ordering link.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
+    <div className="promotion-preview">{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<div><b>{item.name}</b><small>{item.description || "Freshly prepared at Neeru’s Home Kitchen."}</small><strong>{specialPrice ? `${money(Number(specialPrice))} today` : money(item.price)}</strong></div></div>
+    <div className="promotion-form">
+      <label className="wide"><span>WhatsApp message</span><textarea value={message} maxLength={280} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} placeholder="What makes this dish special today?" /></label>
+      <label><span>Offer price <small>Optional</small></span><input type="number" min="0" value={specialPrice} onChange={(event) => { setSpecialPrice(event.target.value); setPrepared(null); }} placeholder={`Regular ${money(item.price)}`} /></label>
+      <label><span>Limited portions <small>Optional</small></span><input type="number" min="0" value={portions} onChange={(event) => { setPortions(event.target.value); setPrepared(null); }} placeholder="For example, 10" /></label>
+      <label className="wide"><span>Order before <small>Optional</small></span><input type="time" value={until} onChange={(event) => { setUntil(event.target.value); setPrepared(null); }} /></label>
+    </div>
+    <p className="promotion-note"><MessageCircle /> Sharing creates a dish-specific WhatsApp preview with its image. Customers tap it, see this offer, add the dish and order.</p>
+    {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
+    {prepared && <a className="promotion-ready-link" href={prepared.url.replace("/share/dish?id=", "/?dish=")} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Preview what customers will see</a>}
+    <div className="modal-actions promotion-actions"><button type="button" className="cancel" onClick={onClose}>Close</button><span />{prepared ? <button type="button" className="save whatsapp-share-button" onClick={share}><MessageCircle /> Share now</button> : <button type="button" className="save" disabled={busy || !message.trim()} onClick={prepare}><Check /> {busy ? "Preparing…" : "Save offer & prepare"}</button>}</div>
+  </section></div>;
 }
 
 function MenuItemForm({ item, onClose, onSave }: { item: MenuItem | null; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) => void }) {

@@ -38,6 +38,8 @@ type StoreMenuItem = {
   image_url?: string;
   is_featured: boolean;
   portions_available: number | null;
+  promotion_message: string;
+  promotion_until: string | null;
 };
 
 type Profile = {
@@ -102,7 +104,7 @@ const starterCatalog = [
   ["curd-rice", "Curd rice", 130],
   ["aloo-paratha", "Aloo paratha", 90],
   ["poha", "Poha", 80],
-].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null })) as StoreMenuItem[];
+].map(([id, name, price], index) => ({ id: String(id), name: String(name), price: Number(price), description: "Comforting home-style food, made fresh today.", spice_level: "mild", photo_path: null, image_url: starterImages[String(name)], is_featured: index < 3, portions_available: null, promotion_message: "", promotion_until: null })) as StoreMenuItem[];
 const stageLabels: Record<string, string> = {
   new: "Order placed",
   delivered: "Delivered",
@@ -148,6 +150,7 @@ const savedCart = (): Record<string, number> => {
   }
 };
 export function Storefront() {
+  const [sharedDishId] = useState(() => new URLSearchParams(window.location.search).get("dish") || "");
   const [view, setView] = useState<StoreView>("menu");
   const [session, setSession] = useState<Session | null>(null);
   const [items, setItems] = useState<StoreMenuItem[]>([]);
@@ -197,7 +200,7 @@ export function Storefront() {
     setLoading(true);
     const [{ data: menu }, { data: daily }, { data: configuration }] = await Promise.all([
       supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path").eq("is_active", true).order("name"),
-      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", localToday()),
+      supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", localToday()),
       supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
     ]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
@@ -217,6 +220,8 @@ export function Storefront() {
         image_url: row.photo_path ? `/api/photos?key=${encodeURIComponent(row.photo_path)}` : starterImages[row.name],
         is_featured: Boolean(today?.is_featured),
         portions_available: today?.portions_available ?? null,
+        promotion_message: today?.promotion_message ?? "",
+        promotion_until: today?.promotion_until?.slice(0, 5) ?? null,
       }];
     }));
     if (configuration) setSettings({ ...defaultSettings, ...configuration });
@@ -228,8 +233,8 @@ export function Storefront() {
     const { data } = await supabase.from("customer_profiles").select("*").eq("id", session.user.id).maybeSingle();
     if (!data) return;
     const next = data as Profile;
-    if (next.access_status !== "approved") {
-      setNotice(next.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Home Kitchen." : "Your account is waiting for kitchen approval.");
+    if (next.access_status === "rejected") {
+      setNotice("This account is unavailable. Please contact Neeru’s Home Kitchen.");
       await supabase.auth.signOut();
       return;
     }
@@ -248,6 +253,7 @@ export function Storefront() {
   }, [items, search]);
   const featured = items.filter((item) => item.is_featured);
   const heroItem = featured[0] || items[0];
+  const sharedDish = items.find((item) => item.id === sharedDishId);
   const currentTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }).format(new Date());
   const acceptingOrders = settings.ordering_open && (!settings.order_cutoff || currentTime <= settings.order_cutoff.slice(0, 5));
   const cartLines = items.filter((item) => cart[item.id]).map((item) => ({ ...item, quantity: cart[item.id] }));
@@ -306,6 +312,10 @@ export function Storefront() {
 
       <main className="store-main">
         {view === "menu" && <>
+          {sharedDish && <section className="shared-dish-banner">
+            <div className="shared-dish-image">{sharedDish.image_url ? <img src={sharedDish.image_url} alt={sharedDish.name} /> : <ChefHat />}</div>
+            <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{sharedDish.name}</h1><p>{sharedDish.promotion_message || sharedDish.description}</p><div className="shared-dish-facts"><strong>{formatMoney(sharedDish.price)}</strong>{sharedDish.portions_available !== null && <span>{sharedDish.portions_available > 0 ? `Only ${sharedDish.portions_available} portions today` : "Sold out"}</span>}{sharedDish.promotion_until && <span>Order before {sharedDish.promotion_until}</span>}</div><button className="store-primary" disabled={sharedDish.portions_available === 0} onClick={() => { setQuantity(sharedDish.id, Math.max(1, cart[sharedDish.id] || 0)); go("cart"); }}>{sharedDish.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
+          </section>}
           <section className="store-hero">
             <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${acceptingOrders ? "" : "closed"}`}><i />{acceptingOrders ? "Taking orders today" : settings.ordering_open ? "Today’s order cutoff has passed" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
             <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} /> : <UtensilsCrossed />}</div>
@@ -394,7 +404,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
     setAwaitingConfirmation(false);
     if (mode === "register" && (!name.trim() || !wing || !flat)) {
       if (!flat) setFlatWarning("Please enter your flat number using numbers only.");
-      setMessage(!name.trim() ? "Please enter your name." : !wing ? "Please choose your building wing." : "Please enter your flat number.");
+      setMessage(!name.trim() ? "Please enter your name." : !wing ? "Please choose your tower." : "Please enter your flat number.");
       return;
     }
 
@@ -410,10 +420,10 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
           return setMessage("That mobile number or PIN is not correct.");
         }
         const { data: access, error: accessError } = await supabase.from("customer_profiles").select("access_status").eq("id", data.user.id).single();
-        if (accessError || access?.access_status !== "approved") {
+        if (accessError || access?.access_status === "rejected") {
           await supabase.auth.signOut();
           setBusy(false);
-          return setMessage(access?.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Home Kitchen." : "Your request is waiting for kitchen approval. Please try again after the family confirms it.");
+          return setMessage(access?.access_status === "rejected" ? "This account is unavailable. Please contact Neeru’s Home Kitchen." : "We could not open your customer profile. Please try again.");
         }
         setBusy(false);
         onSuccess();
@@ -425,14 +435,17 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         password: pin,
         options: { data: { full_name: name.trim(), flat_number: flatAddress(wing, flat), phone: formattedPhone, login_method: "phone_pin" } },
       });
-      if (data.session) await supabase.auth.signOut();
       setBusy(false);
       if (error) {
         if (/already|exists|registered/i.test(error.message)) return setMessage("This mobile number already has an account. Choose Returning customer and sign in with your PIN.");
         return setMessage(error.message);
       }
+      if (data.session) {
+        onSuccess();
+        return;
+      }
       setMessageIsSuccess(true);
-      setMessage("Request sent to Neeru’s Home Kitchen. A family admin will approve your account, then you can sign in with this number and PIN.");
+      setMessage("Your account was created. Choose Returning customer and sign in with this number and PIN.");
       return;
     }
 
@@ -480,8 +493,8 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
     <button className="sheet-close" onClick={onClose}><X /></button>
     <StoreLogo />
     <span className="store-eyebrow">WELCOME TO NEERU’S</span>
-    <h2>{mode === "register" ? "Request an account" : "Welcome back"}</h2>
-    <p>{mode === "register" ? "Use your mobile number or email. Phone accounts are approved by the kitchen." : "Sign in to order and follow your meals."}</p>
+    <h2>{mode === "register" ? "Create your account" : "Welcome back"}</h2>
+    <p>{mode === "register" ? "Add your mobile number, name and tower details to start ordering immediately." : "Sign in to order and follow your meals."}</p>
     <div className="auth-tabs">
       <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>New customer</button>
       <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>Returning customer</button>
@@ -490,7 +503,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
       {mode === "register" && <>
         <label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>
         <div className="flat-address-fields">
-          <label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label>
+          <label><span>Tower</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Tower {option}</option>)}</select></label>
           <label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label>
         </div>
       </>}
@@ -502,11 +515,11 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         <label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "register" ? "new-password" : "current-password"} required /></label>
       </>}
       {message && <div className={`auth-message ${messageIsSuccess ? "success" : ""}`}>{message}</div>}
-      <button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? method === "phone" ? "Send request to kitchen" : "Create email account" : method === "phone" ? "Sign in with mobile" : "Sign in with email"}</button>
+      <button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? method === "phone" ? "Create account & order" : "Create email account" : method === "phone" ? "Sign in with mobile" : "Sign in with email"}</button>
       {method === "email" && awaitingConfirmation && <button className="resend-confirmation" type="button" disabled={busy} onClick={resendConfirmation}>Resend confirmation email</button>}
     </form>
     <button className="auth-method-switch" type="button" onClick={() => { setMethod(method === "phone" ? "email" : "phone"); setMessage(""); setAwaitingConfirmation(false); }}>{method === "phone" ? "Use email and password instead" : "Use mobile number and PIN instead"}</button>
-    <small>{method === "phone" ? "No SMS charge: the kitchen approves new phone accounts. Your PIN is private and should not be shared." : "Email accounts use Supabase confirmation and remain available as an alternative."}</small>
+    <small>{method === "phone" ? "No SMS charge and no approval wait. Your six-digit PIN is private and should not be shared." : "Email accounts use Supabase confirmation and remain available as an alternative."}</small>
   </section></div>;
 }
 
@@ -547,7 +560,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
     event.preventDefault(); if (!supabase) return;
     if (!wing || !flat) {
       if (!flat) setFlatWarning("Please enter your flat number using numbers only.");
-      setMessage(!wing ? "Please choose your building wing." : "Please enter your flat number.");
+      setMessage(!wing ? "Please choose your tower." : "Please enter your flat number.");
       return;
     }
     setBusy(true);
@@ -555,7 +568,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
     const { error } = await supabase.from("customer_profiles").upsert({ id: next.id, full_name: next.full_name, flat_number: next.flat_number, email: next.email, phone: next.phone, spice_preference: next.spice_preference, standing_instructions: next.standing_instructions });
     setBusy(false); if (error) setMessage(error.message); else onSaved(next);
   }
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && !isPhoneAccount && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{isPhoneAccount ? "Mobile login" : session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={isPhoneAccount || Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Tower</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Tower {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && !isPhoneAccount && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{isPhoneAccount ? "Mobile login" : session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={isPhoneAccount || Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder, alert: OrderAlertResult | null) => void }) {
