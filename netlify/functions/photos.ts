@@ -6,7 +6,7 @@ const MAX_PAYMENT_PHOTO_SIZE = 6 * 1024 * 1024;
 const MAX_MENU_PHOTO_SIZE = 512 * 1024;
 const MAX_ORDER_PHOTO_SIZE = 160 * 1024;
 const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
-const VALID_PRIVATE_KEY = /^(orders|menu)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
+const VALID_PRIVATE_KEY = /^(orders|menu|banner)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.[a-z0-9]+$/i;
 const ALLOWED_ORIGINS = new Set(["https://neerus-kitchen.netlify.app", "http://127.0.0.1:5174", "http://localhost:5174"]);
 
 function corsHeaders(request: Request) {
@@ -65,15 +65,15 @@ export default async (request: Request) => {
     const form = await request.formData();
     const photo = form.get("photo");
     const purpose = form.get("purpose");
-    if (!(photo instanceof File) || (purpose !== "orders" && purpose !== "menu" && purpose !== "payment")) {
+    if (!(photo instanceof File) || (purpose !== "orders" && purpose !== "menu" && purpose !== "banner" && purpose !== "payment")) {
       return json(request, { error: "A valid photo and purpose are required" }, { status: 400 });
     }
-    const maximumSize = purpose === "orders" ? MAX_ORDER_PHOTO_SIZE : purpose === "menu" ? MAX_MENU_PHOTO_SIZE : MAX_PAYMENT_PHOTO_SIZE;
+    const maximumSize = purpose === "orders" ? MAX_ORDER_PHOTO_SIZE : purpose === "menu" || purpose === "banner" ? MAX_MENU_PHOTO_SIZE : MAX_PAYMENT_PHOTO_SIZE;
     if (!ALLOWED_TYPES.has(photo.type) || photo.size > maximumSize) {
       const limit = purpose === "orders"
         ? "160 KB (order photos are compressed on your phone)"
-        : purpose === "menu"
-          ? "512 KB (dish photos are compressed automatically before upload)"
+        : purpose === "menu" || purpose === "banner"
+          ? "512 KB (photos are compressed automatically before upload)"
           : "6 MB";
       return json(request, { error: `Use a JPG, PNG, WebP or HEIC image under ${limit}` }, { status: 400 });
     }
@@ -118,7 +118,7 @@ export default async (request: Request) => {
     const contentType = String(entry.metadata?.contentType || "application/octet-stream");
     const cacheControl = key === "payment/current"
       ? "no-store"
-      : key.startsWith("menu/")
+      : key.startsWith("menu/") || key.startsWith("banner/")
         ? "public, max-age=31536000, immutable"
         : "private, max-age=3600";
     const etag = entry.etag.startsWith('"') ? entry.etag : `"${entry.etag}"`;
@@ -128,7 +128,7 @@ export default async (request: Request) => {
       ETag: etag,
       ...corsHeaders(request),
     };
-    if (key.startsWith("menu/") && request.headers.get("if-none-match")?.split(",").map((value) => value.trim()).includes(etag)) {
+    if ((key.startsWith("menu/") || key.startsWith("banner/")) && request.headers.get("if-none-match")?.split(",").map((value) => value.trim()).includes(etag)) {
       return new Response(null, { status: 304, headers: responseHeaders });
     }
     return new Response(entry.data, {

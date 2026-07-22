@@ -36,7 +36,7 @@ import {
   Save,
   Search,
   Share2,
-  Settings2,
+  Settings,
   ShieldCheck,
   Smartphone,
   Sun,
@@ -48,12 +48,14 @@ import {
   Volume2,
   VolumeX,
   UsersRound,
+  Phone,
   X,
 } from "lucide-react";
 import "./styles.css";
 import "./storefront.css";
 import { Storefront } from "./storefront";
 import { supabase } from "./supabase";
+import { autoGrow, useAutoGrowingTextareas } from "./autoGrow";
 import { ceilTimeToQuarter, composePromotionShareText, formatTime12, promotionTimingLines, quarterHourMinutes } from "./promotionFormat";
 
 type Stage = "new" | "delivered";
@@ -74,6 +76,7 @@ type Order = {
   created_at?: string;
   order_date: string;
   customer_name: string;
+  customer_phone?: string;
   flat_number: string;
   order_details: string;
   delivery_time: string | null;
@@ -101,6 +104,7 @@ type MenuItem = {
   description?: string;
   spice_level?: "mild" | "medium" | "spicy";
   category_id?: string | null;
+  category_ids?: string[];
   unit_label?: string;
   daily?: {
     is_available: boolean;
@@ -121,17 +125,16 @@ type DishCategory = {
 };
 type CustomerProfile = {
   customer_name: string;
+  customer_phone?: string;
   flat_number: string;
   delivered_by: DeliveryBy;
 };
-type CustomerAccessRequest = {
-  id: string;
-  full_name: string;
+type CustomerHistory = {
+  customer_name: string;
   flat_number: string;
-  phone: string;
-  access_status: "pending" | "approved" | "rejected";
-  access_requested_at: string | null;
-  created_at: string;
+  orders: Order[];
+  admin_remarks: string;
+  customer_phone?: string;
 };
 type ExportOptions = {
   from: string;
@@ -153,6 +156,10 @@ type AdminStoreSettings = {
   merchant_name: string;
   order_cutoff: string;
   whatsapp_number: string;
+  announcement_enabled: boolean;
+  announcement_title: string;
+  announcement_message: string;
+  announcement_image_path: string;
 };
 type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
 type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
@@ -327,7 +334,9 @@ async function sharePromotion(prepared: PreparedPromotion) {
   return "WhatsApp opened with the offer and direct order link. The link generates the dish photo preview.";
 }
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
-const photoApiBase = import.meta.env.DEV ? "https://neerus-kitchen.netlify.app/api/photos" : "/api/photos";
+// Use the same-origin API in every environment. Vite forwards local /api calls,
+// while Cloudflare Pages handles production calls through its Pages Function.
+const photoApiBase = "/api/photos";
 const photoApiUrl = (query = "") => `${photoApiBase}${query}`;
 
 const starterMenu: MenuItem[] = [
@@ -366,6 +375,7 @@ const today = () => {
 const emptyDraft = (date: string): Draft => ({
   order_date: date,
   customer_name: "",
+  customer_phone: "",
   flat_number: "",
   order_details: "",
   delivery_time: "",
@@ -378,6 +388,14 @@ const emptyDraft = (date: string): Draft => ({
 });
 const money = (amount: number) =>
   `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(amount)}`;
+const portionContents = (unitLabel?: string | null) => {
+  const value = unitLabel?.trim() || "";
+  return value && value.toLowerCase() !== "portion" ? value : "";
+};
+const portionSummary = (unitLabel?: string | null) => {
+  const contents = portionContents(unitLabel);
+  return contents ? ` (${contents} per portion)` : "";
+};
 type BuildingWing = "" | "A" | "B" | "C" | "D";
 const splitAdminFlat = (value = "") => {
   const normalized = value.trim().toUpperCase();
@@ -396,25 +414,17 @@ const shift = (date: string, days: number) => {
   return d.toISOString().slice(0, 10);
 };
 
-async function getPrivatePhotoUrl(path: string, session: Session | null) {
-  if (!session) return undefined;
-  const response = await fetch(photoApiUrl(`?key=${encodeURIComponent(path)}`), {
-    headers: { Authorization: `Bearer ${session.access_token}` },
-  });
-  if (!response.ok) return undefined;
-  return URL.createObjectURL(await response.blob());
-}
+const publicMenuPhotoUrl = (path: string) => photoApiUrl(`?key=${encodeURIComponent(path)}`);
 
 export function AdminApp() {
+  useAutoGrowingTextareas();
   const [selectedDate, setSelectedDate] = useState(today());
   const [orders, setOrders] = useState<Order[]>([]);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
   const [dishCategories, setDishCategories] = useState<DishCategory[]>([]);
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
-  const [accessRequests, setAccessRequests] = useState<CustomerAccessRequest[]>([]);
   const [notificationOrders, setNotificationOrders] = useState<Order[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [notificationBusyId, setNotificationBusyId] = useState("");
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("neeru-admin-alert-sound") !== "off");
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
@@ -426,6 +436,8 @@ export function AdminApp() {
   const [dark, setDark] = useState(() => localStorage.getItem("neeru-theme") === "dark");
   const [phonePreview, setPhonePreview] = useState(false);
   const [editing, setEditing] = useState<Order | null>(null);
+  const [customerHistory, setCustomerHistory] = useState<CustomerHistory | null>(null);
+  const [customerHistoryLoading, setCustomerHistoryLoading] = useState(false);
   const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deliveringOrder, setDeliveringOrder] = useState<Order | null>(null);
@@ -440,17 +452,21 @@ export function AdminApp() {
   const [appUpdateReady, setAppUpdateReady] = useState(false);
   const [notice, setNotice] = useState("");
   const [session, setSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(!supabase);
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Home Kitchen", order_cutoff: "", whatsapp_number: "918483000013" });
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Home Kitchen", order_cutoff: "", whatsapp_number: "918684000013", announcement_enabled: false, announcement_title: "", announcement_message: "", announcement_image_path: "" });
   const knownActionIds = useRef<Set<string> | null>(null);
   const alertAudioContext = useRef<AudioContext | null>(null);
   const soundEnabledRef = useRef(soundEnabled);
 
   useEffect(() => {
     if (!supabase) return;
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthReady(true);
+    }).catch(() => setAuthReady(true));
     const { data: listener } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       if (event === "PASSWORD_RECOVERY") setRecoveringPassword(true);
@@ -479,7 +495,7 @@ export function AdminApp() {
     localStorage.setItem("neeru-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !menuAdding && !menuEditing && !promotingItem && !categoryAdding && !categoryEditing && !promotingCategory && !deletingOrder && !deliveringOrder;
+  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !customerHistory && !menuAdding && !menuEditing && !promotingItem && !categoryAdding && !categoryEditing && !promotingCategory && !deletingOrder && !deliveringOrder;
   useEffect(() => {
     if (import.meta.env.DEV) return;
     const currentAsset = Array.from(document.scripts)
@@ -574,47 +590,46 @@ export function AdminApp() {
     setLoading(false);
     if (error) setNotice(`Could not load orders: ${error.message}`);
     else {
-      const resolved = await Promise.all(
-        ((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map(async (rawOrder) => {
-          const order = {
-            ...rawOrder,
-            stage: normalizeStage(rawOrder.stage),
-            items: ((rawOrder as typeof rawOrder & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
-              ...line,
-              unit_price: Number(line.unit_price),
-              quantity: Number(line.quantity),
-              unit_label: line.unit_label || "portion",
-            })),
-          } as Order;
-          if (!order.photo_path) return order;
-          return { ...order, photo_url: await getPrivatePhotoUrl(order.photo_path, session) };
-        }),
-      );
-      setOrders(resolved);
+      const { data: profiles } = await supabase.from("customer_profiles").select("full_name,flat_number,phone");
+      const phones = new Map((profiles || []).map((profile) => [`${profile.full_name.trim().toLowerCase()}|${profile.flat_number.trim().toLowerCase()}`, profile.phone]));
+      setOrders(((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map((rawOrder) => ({
+        ...rawOrder,
+        customer_phone: phones.get(`${rawOrder.customer_name.trim().toLowerCase()}|${rawOrder.flat_number.trim().toLowerCase()}`) || "",
+        stage: normalizeStage(rawOrder.stage),
+        items: ((rawOrder as typeof rawOrder & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
+          ...line,
+          unit_price: Number(line.unit_price),
+          quantity: Number(line.quantity),
+          unit_label: line.unit_label || "portion",
+        })),
+      } as Order)));
     }
   }
 
   async function loadMenu() {
     if (!supabase || !session) return;
-    const [{ data, error }, { data: daily }, { data: configuration }, categoryResult] = await Promise.all([
+    const [{ data, error }, { data: daily }, { data: configuration }, categoryResult, categoryLinks] = await Promise.all([
       supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", today()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number,announcement_enabled,announcement_title,announcement_message,announcement_image_path").eq("id", 1).maybeSingle(),
       supabase.from("dish_categories").select("*").order("sort_order").order("name"),
+      supabase.from("menu_item_categories").select("menu_item_id,category_id"),
     ]);
     if (error || !data?.length) return;
     const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
+    const categoryIdsByItem = new Map<string, string[]>();
+    for (const link of categoryLinks.data || []) categoryIdsByItem.set(link.menu_item_id, [...(categoryIdsByItem.get(link.menu_item_id) || []), link.category_id]);
     const resolved = await Promise.all(
       (data as MenuItem[]).map(async (item) => {
         const todayEntry = dailyMap.get(item.id);
-        const withDaily = { ...item, daily: { is_available: item.is_active && (todayEntry?.is_available ?? true), is_featured: Boolean(todayEntry?.is_featured), portions_available: todayEntry?.portions_available ?? null, special_price: todayEntry?.special_price ?? null, promotion_message: todayEntry?.promotion_message ?? "", promotion_until: todayEntry?.promotion_until?.slice(0, 5) ?? null } };
+        const withDaily = { ...item, category_ids: categoryIdsByItem.get(item.id) || (item.category_id ? [item.category_id] : []), daily: { is_available: item.is_active && (todayEntry?.is_available ?? true), is_featured: Boolean(todayEntry?.is_featured), portions_available: todayEntry?.portions_available ?? null, special_price: todayEntry?.special_price ?? null, promotion_message: todayEntry?.promotion_message ?? "", promotion_until: todayEntry?.promotion_until?.slice(0, 5) ?? null } };
         if (!item.photo_path) {
           return { ...withDaily, price: Number(item.price || 0), photo_url: starterImage.get(item.name.toLowerCase()) };
         }
         return {
           ...withDaily,
           price: Number(item.price || 0),
-          photo_url: await getPrivatePhotoUrl(item.photo_path, session),
+          photo_url: publicMenuPhotoUrl(item.photo_path),
         };
       }),
     );
@@ -627,7 +642,7 @@ export function AdminApp() {
     if (!supabase || !session) return;
     const { data, error } = await supabase
       .from("orders")
-      .select("customer_name,flat_number,delivered_by,created_at")
+      .select("customer_name,flat_number,customer_phone,delivered_by,created_at")
       .order("created_at", { ascending: false })
       .limit(500);
     if (error) return;
@@ -637,6 +652,7 @@ export function AdminApp() {
       if (key && !unique.has(key)) {
         unique.set(key, {
           customer_name: String(row.customer_name),
+          customer_phone: String(row.customer_phone || ""),
           flat_number: String(row.flat_number),
           delivered_by: row.delivered_by as DeliveryBy,
         });
@@ -645,40 +661,72 @@ export function AdminApp() {
     setCustomers([...unique.values()]);
   }
 
+  async function openCustomerHistory(order: Pick<Order, "customer_name" | "flat_number" | "customer_phone">) {
+    if (!supabase) return;
+    setCustomerHistory({ customer_name: order.customer_name, flat_number: order.flat_number, orders: [], admin_remarks: "", customer_phone: order.customer_phone || "" });
+    setCustomerHistoryLoading(true);
+    const [ordersResult, noteResult, profileResult] = await Promise.all([
+      supabase
+      .from("orders")
+      .select("id,created_at,order_date,order_details,delivery_time,amount,stage,is_paid,payment_status,payment_method,delivered_by,remarks,customer_name,flat_number,photo_path")
+      .eq("customer_name", order.customer_name)
+      .eq("flat_number", order.flat_number)
+      .order("order_date", { ascending: false })
+      .order("created_at", { ascending: false })
+      .limit(1000),
+      supabase.from("customer_admin_notes").select("remarks").eq("customer_name", order.customer_name).eq("flat_number", order.flat_number).maybeSingle(),
+      supabase.from("customer_profiles").select("phone").eq("full_name", order.customer_name).eq("flat_number", order.flat_number).maybeSingle(),
+    ]);
+    setCustomerHistoryLoading(false);
+    if (ordersResult.error) {
+      setCustomerHistory(null);
+      setNotice(`Could not load customer history: ${ordersResult.error.message}`);
+      return;
+    }
+    setCustomerHistory({
+      customer_name: order.customer_name,
+      flat_number: order.flat_number,
+      orders: ((ordersResult.data || []) as (Omit<Order, "stage"> & { stage: string })[]).map((entry) => ({ ...entry, stage: normalizeStage(entry.stage) } as Order)),
+      admin_remarks: noteResult.data?.remarks || "",
+      customer_phone: profileResult.data?.phone || "",
+    });
+  }
+
+  async function saveCustomerRemarks(history: CustomerHistory, remarks: string) {
+    if (!supabase) return;
+    const { error } = await supabase.from("customer_admin_notes").upsert({ customer_name: history.customer_name, flat_number: history.flat_number, remarks: remarks.trim() }, { onConflict: "customer_name,flat_number" });
+    if (error) throw new Error(error.message);
+    setCustomerHistory((current) => current ? { ...current, admin_remarks: remarks } : current);
+  }
+
   async function loadActionCenter(announceNew = false) {
     if (!supabase || !session) return;
-    const [requestResult, orderResult] = await Promise.all([
-      supabase
-        .from("customer_profiles")
-        .select("id,full_name,flat_number,phone,access_status,access_requested_at,created_at")
-        .eq("access_status", "pending")
-        .order("access_requested_at", { ascending: true, nullsFirst: false }),
-      supabase
-        .from("orders")
-        .select("*")
-        .eq("source", "customer")
-        .neq("stage", "delivered")
-        .order("created_at", { ascending: false })
-        .limit(30),
-    ]);
-    if (requestResult.error && !/access_status/i.test(requestResult.error.message)) {
-      setNotice(`Could not load customer requests: ${requestResult.error.message}`);
+    const { data, error } = await supabase
+      .from("orders")
+      .select("*,order_items(id,menu_item_id,item_name,unit_price,quantity,unit_label)")
+      .eq("source", "customer")
+      .neq("stage", "delivered")
+      .order("created_at", { ascending: false })
+      .limit(30);
+    if (error) {
+      setNotice(`Could not load online order alerts: ${error.message}`);
     }
-    if (orderResult.error) {
-      setNotice(`Could not load online order alerts: ${orderResult.error.message}`);
-    }
-    const requests = (requestResult.data || []) as CustomerAccessRequest[];
-    const onlineOrders = ((orderResult.data || []) as (Omit<Order, "stage"> & { stage: string })[])
-      .map((order) => ({ ...order, stage: normalizeStage(order.stage) } as Order));
-    const nextIds = new Set([
-      ...requests.map((request) => `signup:${request.id}`),
-      ...onlineOrders.map((order) => `order:${order.id}`),
-    ]);
+    const onlineOrders = ((data || []) as (Omit<Order, "stage"> & { stage: string; order_items?: OrderLine[] })[])
+      .map((order) => ({
+        ...order,
+        stage: normalizeStage(order.stage),
+        items: (order.order_items || []).map((line) => ({
+          ...line,
+          unit_price: Number(line.unit_price),
+          quantity: Number(line.quantity),
+          unit_label: line.unit_label || "portion",
+        })),
+      } as Order));
+    const nextIds = new Set(onlineOrders.map((order) => `order:${order.id}`));
     const hasNewAction = knownActionIds.current
       ? [...nextIds].some((id) => !knownActionIds.current?.has(id))
       : false;
     knownActionIds.current = nextIds;
-    setAccessRequests(requests);
     setNotificationOrders(onlineOrders);
     if (announceNew && hasNewAction) soundAlert();
   }
@@ -742,10 +790,10 @@ export function AdminApp() {
   );
   const draft = adding ? emptyDraft(selectedDate) : editing;
 
-  async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "payment") {
+  async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "banner" | "payment") {
     if (!session) throw new Error("Please sign in again before uploading a photo.");
     const form = new FormData();
-    const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : purpose === "menu" ? await compressMenuPhoto(photo) : photo;
+    const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : purpose === "menu" || purpose === "banner" ? await compressMenuPhoto(photo) : photo;
     form.append("photo", preparedPhoto);
     form.append("purpose", purpose);
     const response = await fetch(photoApiUrl(), {
@@ -768,7 +816,7 @@ export function AdminApp() {
     const structuredItems = (values.items || [])
       .filter((line) => line.menu_item_id && line.quantity > 0)
       .map((line) => ({ ...line, quantity: Math.min(20, Math.max(1, Number(line.quantity))), unit_price: Number(line.unit_price) }));
-    const structuredDetails = structuredItems.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label && line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+    const structuredDetails = structuredItems.map((line) => `${line.item_name} × ${line.quantity} portion${line.quantity === 1 ? "" : "s"}${portionSummary(line.unit_label)}`).join(", ");
     const structuredTotal = structuredItems.reduce((total, line) => total + line.unit_price * line.quantity, 0);
     let photoPath = values.photo_path;
     if (values.stage === "delivered") {
@@ -783,6 +831,7 @@ export function AdminApp() {
     const record = {
       order_date: values.order_date,
       customer_name: values.customer_name.trim(),
+      customer_phone: (values.customer_phone || "").replace(/\D/g, "").slice(-10),
       flat_number: values.flat_number,
       order_details: structuredDetails || values.order_details.trim(),
       photo_path: photoPath,
@@ -1045,7 +1094,7 @@ export function AdminApp() {
     return `${keys.length} order photos removed. The order records remain.`;
   }
 
-  async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label">, photo?: File, existing?: MenuItem) {
+  async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label"> & { category_ids?: string[] }, photo?: File, existing?: MenuItem) {
     if (!supabase || !session) return;
     let photoPath: string | null = existing?.photo_path ?? null;
     let uploadedPhotoPath: string | null = null;
@@ -1058,20 +1107,23 @@ export function AdminApp() {
       }
     }
     const record = { name: values.name.trim(), price: Number(values.price), description: values.description?.trim() ?? "", spice_level: values.spice_level || "mild", category_id: values.category_id || null, unit_label: values.unit_label?.trim() || "portion", photo_path: photoPath, is_active: true };
-    const { error } = existing
-      ? await supabase.from("menu_items").update(record).eq("id", existing.id)
-      : await supabase.from("menu_items").insert(record);
-    if (error) {
+    const result = existing
+      ? await supabase.from("menu_items").update(record).eq("id", existing.id).select("id").single()
+      : await supabase.from("menu_items").insert(record).select("id").single();
+    if (result.error || !result.data) {
       if (uploadedPhotoPath) await deletePhotoKeys([uploadedPhotoPath]).catch(() => undefined);
-      setNotice(`Could not save menu item: ${error.message}`);
+      setNotice(`Could not save menu item: ${result.error?.message || "unknown error"}`);
     }
     else {
       if (uploadedPhotoPath && existing?.photo_path && existing.photo_path !== uploadedPhotoPath) {
         await deletePhotoKeys([existing.photo_path]).catch(() => undefined);
       }
+      const categoryIds = [...new Set([record.category_id, ...(values.category_ids || [])].filter(Boolean))] as string[];
+      const clearLinks = await supabase.from("menu_item_categories").delete().eq("menu_item_id", result.data.id);
+      const saveLinks = clearLinks.error ? clearLinks : categoryIds.length ? await supabase.from("menu_item_categories").insert(categoryIds.map((category_id) => ({ menu_item_id: result.data.id, category_id }))) : null;
       setMenuAdding(false);
       setMenuEditing(null);
-      setNotice(`${values.name} was ${existing ? "updated" : "added to the dish catalogue"}.`);
+      setNotice(saveLinks?.error ? `${values.name} was saved in its primary category. Extra categories will work after the multi-category database update is applied.` : `${values.name} was ${existing ? "updated" : "added to the dish catalogue"}.`);
       loadMenu();
     }
   }
@@ -1166,7 +1218,7 @@ export function AdminApp() {
       "",
       values.message.trim() || item.description || "Freshly prepared at Neeru’s Home Kitchen.",
       "",
-      `💰 *Today: ${money(price)}${item.unit_label && item.unit_label !== "portion" ? ` / ${item.unit_label}` : ""}*`,
+      `💰 *Today: ${money(price)} / portion*${portionSummary(item.unit_label)}`,
     ];
     if (values.specialPrice !== null && Number(values.specialPrice) < Number(item.price)) lines.push(`Regular price: ${money(item.price)}`);
     if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
@@ -1221,7 +1273,7 @@ export function AdminApp() {
       values.message.trim(),
       "",
       ...categoryItems.flatMap((item) => [
-        `*${item.name}* – ${money(Number(item.daily?.special_price ?? item.price))}${item.unit_label && item.unit_label !== "portion" ? ` / ${item.unit_label}` : ""}`,
+        `*${item.name}* – ${money(Number(item.daily?.special_price ?? item.price))} / portion${portionSummary(item.unit_label)}`,
         item.description || "Made fresh after you order.",
         "",
       ]),
@@ -1317,14 +1369,6 @@ export function AdminApp() {
     const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...nextSettings, order_cutoff: nextSettings.order_cutoff || null });
     if (error) throw new Error(`Could not save customer contact: ${error.message}`);
     setStoreSettings(nextSettings);
-  }
-
-  async function reviewCustomerAccess(customerId: string, approve: boolean) {
-    if (!supabase) throw new Error("The shared database is not connected.");
-    const { error } = await supabase.rpc("review_customer_access", { p_customer_id: customerId, p_approve: approve });
-    if (error) throw new Error(error.message);
-    await loadActionCenter(false);
-    setNotice(approve ? "Customer approved. They can now sign in with their mobile number and PIN." : "Customer request declined.");
   }
 
   async function updateAdminAccount(values: AdminAccountUpdate) {
@@ -1451,17 +1495,7 @@ export function AdminApp() {
     setScreen(next);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
-  const notificationCount = accessRequests.length + notificationOrders.length;
-  const reviewFromNotifications = async (request: CustomerAccessRequest, approve: boolean) => {
-    setNotificationBusyId(request.id);
-    try {
-      await reviewCustomerAccess(request.id, approve);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not review this customer request.");
-    } finally {
-      setNotificationBusyId("");
-    }
-  };
+  const notificationCount = notificationOrders.length;
   const openNotificationOrder = (order: Order) => {
     setNotificationsOpen(false);
     setAdding(false);
@@ -1471,6 +1505,7 @@ export function AdminApp() {
     setEditing(order);
   };
 
+  if (supabase && !authReady) return <main className="login-page"><section className="login-card"><LogoMark /><p className="eyebrow">RESTORING THIS DEVICE</p><h1>Neeru’s Home Kitchen</h1><p>Checking the saved secure sign-in…</p></section></main>;
   if (supabase && !session) return <Login dark={dark} />;
   if (supabase && session && recoveringPassword) {
     return <PasswordReset dark={dark} onComplete={() => setRecoveringPassword(false)} />;
@@ -1510,29 +1545,25 @@ export function AdminApp() {
                 <ChefHat size={18} /> Menu
               </button>
               <button className={screen === "settings" ? "active" : ""} onClick={() => openScreen("settings")}>
-                <Settings2 size={18} /> Settings
+                <Settings size={18} /> Settings
               </button>
             </nav>
             <div className="header-actions">
               <AdminNotificationCenter
                 open={notificationsOpen}
                 count={notificationCount}
-                accessRequests={accessRequests}
                 orders={notificationOrders}
                 soundEnabled={soundEnabled}
-                busyId={notificationBusyId}
                 onToggle={() => {
                   if (soundEnabled) ensureAlertAudio();
                   setNotificationsOpen((current) => !current);
                 }}
                 onClose={() => setNotificationsOpen(false)}
                 onToggleSound={toggleAlertSound}
-                onReview={reviewFromNotifications}
                 onOpenOrder={openNotificationOrder}
-                onManageApprovals={() => { setNotificationsOpen(false); openScreen("settings"); }}
               />
               <button className="icon-button text-size" onClick={() => openScreen("settings")} title="Open settings">
-                <Settings2 size={20} />
+                <Settings size={20} />
                 <span>Settings</span>
               </button>
               {session && (
@@ -1607,13 +1638,13 @@ export function AdminApp() {
               ) : filtered.length === 0 ? (
                 <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
-                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} onDeliver={setDeliveringOrder} />
+                <Board orders={filtered} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} onDeliver={setDeliveringOrder} />
               ) : (
-                <OrderList orders={filtered} menuItems={menuItems} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
+                <OrderList orders={filtered} onEdit={openExistingOrder} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
               )}
             </>
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} categories={dishCategories} settings={storeSettings} onSaveSettings={saveStoreSettings} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onAddCategory={() => setCategoryAdding(true)} onEditCategory={setCategoryEditing} onPromoteCategory={setPromotingCategory} onToggleCategory={toggleDishCategory} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} categories={dishCategories} settings={storeSettings} onSaveSettings={saveStoreSettings} onUploadBanner={async (file) => uploadPhoto(file, "banner")} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onAddCategory={() => setCategoryAdding(true)} onEditCategory={setCategoryEditing} onPromoteCategory={setPromotingCategory} onToggleCategory={toggleDishCategory} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
@@ -1622,9 +1653,12 @@ export function AdminApp() {
               customerCount={customers.length}
               adminEmail={session?.user.email || ""}
               paymentSettings={storeSettings}
+              storefrontSettings={storeSettings}
               whatsappNumber={storeSettings.whatsapp_number}
               onLarge={setLarge}
               onDark={setDark}
+              onSaveStorefront={saveStoreSettings}
+              onUploadBanner={(file) => uploadPhoto(file, "banner")}
               onPrepareExport={prepareOrdersExport}
               onCreateBackup={createPortableBackup}
               onRestoreBackup={restorePortableBackup}
@@ -1658,6 +1692,7 @@ export function AdminApp() {
         )}
         {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
         {deliveringOrder && <CompleteDeliveryModal order={deliveringOrder} busy={deliveryBusy} onClose={() => { if (!deliveryBusy) setDeliveringOrder(null); }} onConfirm={() => confirmOrderDelivery(deliveringOrder)} />}
+        {customerHistory && <CustomerHistoryModal history={customerHistory} loading={customerHistoryLoading} onSaveRemarks={saveCustomerRemarks} onClose={() => { if (!customerHistoryLoading) setCustomerHistory(null); }} />}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} categories={dishCategories} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
         {promotingItem && <PromotionModal item={promotingItem} category={dishCategories.find((category) => category.id === promotingItem.category_id && category.is_active)} categoryDishCount={menuItems.filter((candidate) => candidate.is_active && candidate.category_id === promotingItem.category_id).length} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
         {(categoryAdding || categoryEditing) && <CategoryForm category={categoryEditing} onClose={() => { setCategoryAdding(false); setCategoryEditing(null); }} onSave={saveDishCategory} />}
@@ -1667,19 +1702,15 @@ export function AdminApp() {
   );
 }
 
-function AdminNotificationCenter({ open, count, accessRequests, orders, soundEnabled, busyId, onToggle, onClose, onToggleSound, onReview, onOpenOrder, onManageApprovals }: {
+function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, onClose, onToggleSound, onOpenOrder }: {
   open: boolean;
   count: number;
-  accessRequests: CustomerAccessRequest[];
   orders: Order[];
   soundEnabled: boolean;
-  busyId: string;
   onToggle: () => void;
   onClose: () => void;
   onToggleSound: () => void;
-  onReview: (request: CustomerAccessRequest, approve: boolean) => Promise<void>;
   onOpenOrder: (order: Order) => void;
-  onManageApprovals: () => void;
 }) {
   return (
     <div className="notification-center">
@@ -1698,28 +1729,15 @@ function AdminNotificationCenter({ open, count, accessRequests, orders, soundEna
           </div>
           <div className="notification-scroll">
             {!count && <div className="notification-empty"><Check /><b>Nothing needs attention</b><span>New online orders will appear here.</span></div>}
-            {accessRequests.length > 0 && <div className="notification-group">
-              <div className="notification-group-title"><span><UsersRound /> Customer approvals</span><b>{accessRequests.length}</b></div>
-              {accessRequests.map((request) => {
-                const digits = request.phone.replace(/\D/g, "");
-                const shownPhone = digits.length === 12 && digits.startsWith("91") ? `+91 ${digits.slice(2, 7)} ${digits.slice(7)}` : request.phone;
-                return <article className="notification-item signup-notification" key={request.id}>
-                  <span className="notification-item-icon"><CircleUserRound /></span>
-                  <div><b>{request.full_name || "New customer"}</b><small>Flat {request.flat_number || "not added"} · {shownPhone || "No phone"}</small></div>
-                  <div className="notification-review-actions"><button disabled={Boolean(busyId)} onClick={() => onReview(request, true)}><Check /> Approve</button><button disabled={Boolean(busyId)} onClick={() => { if (confirm(`Decline access for ${request.full_name || shownPhone}?`)) onReview(request, false); }}><X /> Decline</button></div>
-                </article>;
-              })}
-            </div>}
             {orders.length > 0 && <div className="notification-group">
               <div className="notification-group-title"><span><ReceiptText /> New online orders</span><b>{orders.length}</b></div>
               {orders.map((order) => <button className="notification-item order-notification" key={order.id} onClick={() => onOpenOrder(order)}>
                 <span className="notification-item-icon"><UtensilsCrossed /></span>
-                <span><b>{order.customer_name} · Flat {order.flat_number}</b><small>{order.order_details}</small></span>
+                <div className="notification-order-copy"><b>{order.customer_name} · Flat {order.flat_number}</b><OrderItemsSummary order={order} variant="list" /></div>
                 <strong>{money(Number(order.amount))}<ChevronRight /></strong>
               </button>)}
             </div>}
           </div>
-          <button className="notification-manage" onClick={onManageApprovals}><Settings2 /> Open settings</button>
         </section>
       )}
     </div>
@@ -1817,13 +1835,29 @@ function StageBadge({ stage }: { stage: Stage }) {
   const s = stages.find((x) => x.key === stage)!;
   return <span className={`stage ${s.color}`}><i />{s.badge}</span>;
 }
-function menuImageFor(order: Order, menuItems: MenuItem[]) {
-  const details = order.order_details.toLowerCase();
-  return menuItems.find((item) => details.includes(item.name.toLowerCase()))?.photo_url;
+function OrderItemsSummary({ order, variant = "card" }: { order: Order; variant?: "card" | "list" | "dialog" }) {
+  const items = (order.items || []).filter((line) => line.quantity > 0 && line.item_name);
+  if (!items.length) return <p className={`order-items-fallback ${variant}`}>{order.order_details}</p>;
+  return (
+    <div className={`order-items-summary ${variant}`} aria-label={`Order: ${order.order_details}`}>
+      {items.map((line) => (
+        <div className="order-item-line" key={line.id || line.menu_item_id}>
+          <b>{line.quantity}×</b>
+          <span>{line.item_name}</span>
+          <small>{line.quantity === 1 ? "portion" : "portions"}{portionContents(line.unit_label) ? ` · ${portionContents(line.unit_label)} per portion` : ""}</small>
+        </div>
+      ))}
+    </div>
+  );
 }
-function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete, onDeliver }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
+function CustomerContactActions({ phone }: { phone?: string }) {
+  const digits = (phone || "").replace(/\D/g, "");
+  if (!digits) return null;
+  const international = digits.length === 10 ? `91${digits}` : digits;
+  return <span className="customer-contact-actions" onClick={(event) => event.stopPropagation()}><a href={`tel:+${international}`} aria-label={`Call customer at ${phone}`} title="Call customer"><Phone size={15} /></a><a href={`https://wa.me/${international}`} target="_blank" rel="noreferrer" aria-label={`WhatsApp customer at ${phone}`} title="Message on WhatsApp"><MessageCircle size={15} /></a></span>;
+}
+function OrderCard({ order, onEdit, onOpenCustomer, onUpdate, onDelete, onDeliver }: { order: Order; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
   const canDeliver = order.stage !== "delivered";
-  const image = order.photo_url || menuImageFor(order, menuItems);
   const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
   return (
     <article className={`card card-${order.stage}`} onClick={() => onEdit(order)}>
@@ -1833,10 +1867,9 @@ function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete, onDeliver }: 
           <button className={`${order.is_paid ? "paid yes" : "paid"} ${order.payment_status === "submitted" ? "submitted" : ""}`} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{paymentLabel}</button>
         </div>
         <div className="card-summary-layout">
-          <span className="order-thumb">{image ? <img src={image} alt="" /> : <ChefHat />}</span>
           <div className="card-summary-copy">
-            <div className="customer-line"><div><h3>{order.customer_name}</h3><span>Flat {order.flat_number}</span></div><strong>{money(Number(order.amount))}</strong></div>
-            <p className="food"><b>{order.order_details}</b></p>
+            <div className="customer-line"><div><button className="customer-history-link" onClick={(event) => { event.stopPropagation(); onOpenCustomer(order); }}>{order.customer_name}</button><span>Flat {order.flat_number} · Tap name for all orders</span></div><CustomerContactActions phone={order.customer_phone} /><strong>{money(Number(order.amount))}</strong></div>
+            <OrderItemsSummary order={order} />
           </div>
         </div>
         {order.remarks && <p className="remark">{order.remarks}</p>}
@@ -1853,7 +1886,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete, onDeliver }: 
   );
 }
 
-function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDelete, onDeliver }: { orders: Order[]; menuItems: MenuItem[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
+function Board({ orders, activeStage, onStage, onEdit, onOpenCustomer, onUpdate, onDelete, onDeliver }: { orders: Order[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
   return (
     <>
       <div className="stage-tabs">
@@ -1865,7 +1898,7 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDe
           return <div className={`column column-${stage.color} ${activeStage === stage.key ? "mobile-active" : ""}`} key={stage.key}>
             <div className="column-title"><span><i />{stage.label}</span><b>{stageOrders.length}</b></div>
             <div className="column-orders">
-              {stageOrders.map((o) => <OrderCard key={o.id} order={o} menuItems={menuItems} onEdit={onEdit} onUpdate={onUpdate} onDelete={onDelete} onDeliver={onDeliver} />)}
+              {stageOrders.map((o) => <OrderCard key={o.id} order={o} onEdit={onEdit} onOpenCustomer={onOpenCustomer} onUpdate={onUpdate} onDelete={onDelete} onDeliver={onDeliver} />)}
               {!stageOrders.length && <div className="column-empty"><Check size={18} /><span>No orders here</span></div>}
             </div>
           </div>;
@@ -1875,13 +1908,11 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDe
   );
 }
 
-function OrderList({ orders, menuItems, onEdit, onUpdate, onDelete }: { orders: Order[]; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
+function OrderList({ orders, onEdit, onOpenCustomer, onUpdate, onDelete }: { orders: Order[]; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
   return <div className="order-list">{orders.map((o, i) => {
-    const image = o.photo_url || menuImageFor(o, menuItems);
     return <div className="order-row" key={o.id} onClick={() => onEdit(o)}>
       <span className="serial">{String(i + 1).padStart(2, "0")}</span>
-      {image ? <img src={image} alt="" /> : <span className="row-placeholder"><ChefHat /></span>}
-      <div className="row-customer"><b>{o.customer_name} <em>· Flat {o.flat_number}</em>{o.source === "customer" && <i className="online-order-tag">Online</i>}</b><small><span>Order</span>{o.order_details}</small></div>
+      <div className="row-customer"><button className="customer-history-link" onClick={(event) => { event.stopPropagation(); onOpenCustomer(o); }}>{o.customer_name}</button> <em>· Flat {o.flat_number}</em><CustomerContactActions phone={o.customer_phone} />{o.source === "customer" && <i className="online-order-tag">Online</i>}<OrderItemsSummary order={o} variant="list" /></div>
       <span className="row-time"><Clock3 size={14} />{o.delivery_time?.slice(0, 5) || "Not set"}</span>
       <b className="row-amount">{money(Number(o.amount))}</b>
       <StageBadge stage={o.stage} />
@@ -1891,7 +1922,39 @@ function OrderList({ orders, menuItems, onEdit, onUpdate, onDelete }: { orders: 
   })}</div>;
 }
 
-function MenuScreen({ items, categories, settings, onSaveSettings, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onAddCategory, onEditCategory, onPromoteCategory, onToggleCategory, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; categories: DishCategory[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onAddCategory: () => void; onEditCategory: (category: DishCategory) => void; onPromoteCategory: (category: DishCategory) => void; onToggleCategory: (category: DishCategory) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
+function CustomerHistoryModal({ history, loading, onSaveRemarks, onClose }: { history: CustomerHistory; loading: boolean; onSaveRemarks: (history: CustomerHistory, remarks: string) => Promise<void>; onClose: () => void }) {
+  const [range, setRange] = useState<"week" | "month" | "year" | "all">("all");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [remarks, setRemarks] = useState(history.admin_remarks);
+  const [saving, setSaving] = useState(false);
+  const now = new Date();
+  const filtered = history.orders.filter((order) => {
+    const date = order.order_date;
+    if (from && date < from) return false;
+    if (to && date > to) return false;
+    if (range === "all" || from || to) return true;
+    const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - (range === "week" ? 7 : range === "month" ? 31 : 365));
+    return new Date(`${date}T00:00:00`) >= cutoff;
+  });
+  const totalSpend = history.orders.reduce((sum, order) => sum + Number(order.amount), 0);
+  const filteredSpend = filtered.reduce((sum, order) => sum + Number(order.amount), 0);
+  const latestOrder = history.orders[0];
+  return <div className="modal-bg customer-history-bg" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="modal customer-history-modal" role="dialog" aria-modal="true" aria-labelledby="customer-history-title">
+      <header className="customer-history-head">
+        <div><span>CLIENT ORDER HISTORY</span><h2 id="customer-history-title">{history.customer_name}</h2><p>Flat {history.flat_number} · Text-only record</p><CustomerContactActions phone={history.customer_phone} /></div>
+        <button type="button" className="history-close" onClick={onClose}>Close</button>
+      </header>
+      {loading ? <p className="customer-history-loading">Loading order history…</p> : <><div className="customer-history-metrics"><span><b>{history.orders.length}</b><small>All orders</small></span><span><b>{money(totalSpend)}</b><small>Total business</small></span><span><b>{history.orders.length ? money(totalSpend / history.orders.length) : "₹0"}</b><small>Average order</small></span><span><b>{latestOrder ? dateLabel(latestOrder.order_date) : "—"}</b><small>Last order</small></span></div><div className="customer-history-filter"><button className={range === "week" && !from && !to ? "active" : ""} onClick={() => { setRange("week"); setFrom(""); setTo(""); }}>Week</button><button className={range === "month" && !from && !to ? "active" : ""} onClick={() => { setRange("month"); setFrom(""); setTo(""); }}>Month</button><button className={range === "year" && !from && !to ? "active" : ""} onClick={() => { setRange("year"); setFrom(""); setTo(""); }}>Year</button><button className={range === "all" && !from && !to ? "active" : ""} onClick={() => { setRange("all"); setFrom(""); setTo(""); }}>All time</button><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div><div className="customer-history-period"><b>{filtered.length} orders · {money(filteredSpend)}</b></div>{filtered.length ? <div className="customer-history-list">{filtered.map((order) => {
+        const payment = order.payment_method === "cash" ? "Cash on delivery" : order.is_paid || order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending";
+        return <article key={order.id}><div><b>{dateLabel(order.order_date)}</b><span>{order.delivery_time?.slice(0, 5) || "Delivery time not set"}</span></div><strong>{money(Number(order.amount))}</strong><p>{order.order_details}</p><small>{order.stage === "delivered" ? "Delivered" : "Open order"} · {payment}</small></article>;
+      })}</div> : <p className="customer-history-loading">No orders in this period.</p>}<div className="customer-history-remarks"><label>Private admin remarks<textarea value={remarks} placeholder="For example: prefers mild food, reliable customer, follow up for special offers…" onChange={(event) => setRemarks(event.target.value)} /></label><button disabled={saving} onClick={async () => { setSaving(true); try { await onSaveRemarks(history, remarks); } finally { setSaving(false); } }}>{saving ? "Saving…" : "Save remarks"}</button></div></>}
+    </section>
+  </div>;
+}
+
+function MenuScreen({ items, categories, settings, onSaveSettings, onUploadBanner, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onAddCategory, onEditCategory, onPromoteCategory, onToggleCategory, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; categories: DishCategory[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onUploadBanner: (file: File) => Promise<string>; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onAddCategory: () => void; onEditCategory: (category: DishCategory) => void; onPromoteCategory: (category: DishCategory) => void; onToggleCategory: (category: DishCategory) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
   const [form, setForm] = useState(settings);
   const [upiQr, setUpiQr] = useState("");
   useEffect(() => setForm(settings), [settings]);
@@ -1907,16 +1970,21 @@ function MenuScreen({ items, categories, settings, onSaveSettings, onDaily, onAd
   const categoryName = (item: MenuItem) => categories.find((category) => category.id === item.category_id)?.name || "Other dishes";
   return (
     <>
-      <section className="page-heading menu-heading"><div><span className="eyebrow">STOREFRONT CONTROL CENTRE</span><span className="page-title-with-info"><h1>Menu & selling</h1><InfoTip label="About menu and selling">Manage dish categories, the dish catalogue, today’s availability, featured dishes and payment instructions.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add dish</button></section>
+      <section className="page-heading menu-heading"><div><span className="eyebrow">DISH CATALOGUE</span><span className="page-title-with-info"><h1>Menu</h1><InfoTip label="About menu">Manage dishes, categories, availability and featured dishes.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add dish</button></section>
       <section className="storefront-manager">
         <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
         <div className="manager-fields">
           <label className="ordering-toggle"><input type="checkbox" checked={form.ordering_open} onChange={(event) => set("ordering_open", event.target.checked)} /><span><b>{form.ordering_open ? "Orders open" : "Orders paused"}</b><small>Customers {form.ordering_open ? "can place new orders" : "can browse but cannot order"}</small></span></label>
-          <label><span>Customer message</span><input value={form.hero_message} onChange={(event) => set("hero_message", event.target.value)} /></label>
+          <label><span>Customer message</span><textarea className="auto-grow" rows={1} value={form.hero_message} onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("hero_message", event.target.value)} /></label>
+          <label className="ordering-toggle"><input type="checkbox" checked={form.announcement_enabled} onChange={(event) => set("announcement_enabled", event.target.checked)} /><span><b>Show kitchen announcement</b><small>Displays a bold offer or update above today’s menu</small></span></label>
+          <label><span>Announcement headline</span><textarea className="auto-grow" rows={1} value={form.announcement_title} maxLength={90} placeholder="For example: Sunday special — free delivery" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("announcement_title", event.target.value)} /></label>
+          <label className="wide"><span>Announcement details <small>Optional</small></span><textarea className="auto-grow" rows={1} value={form.announcement_message} maxLength={180} placeholder="For example: Order before 5 PM. Limited portions available." onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("announcement_message", event.target.value)} /></label>
+          <label className="wide photo-upload"><span>Announcement image <small>Optional</small></span><input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { set("announcement_image_path", await onUploadBanner(file)); } catch { /* upload feedback appears when saving */ } }} /><small>{form.announcement_image_path ? "Image attached. Save storefront to publish it." : "Optional image for a festive message, notice or special offer."}</small></label>
           <label><span>Kitchen UPI ID</span><input value={form.upi_id} onChange={(event) => set("upi_id", event.target.value)} placeholder="yourname@bank" /></label>
           <label><span>Merchant name</span><input value={form.merchant_name} onChange={(event) => set("merchant_name", event.target.value)} /></label>
           <label><span>Order cutoff</span><input type="time" value={form.order_cutoff} onChange={(event) => set("order_cutoff", event.target.value)} /></label>
           <button className="primary manager-save" onClick={() => onSaveSettings(form)}><Check size={18} /> Save storefront</button>
+          <button className="secondary" disabled={!form.announcement_title.trim() && !form.announcement_message.trim()} onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(["❤️ *Neeru’s Home Kitchen*", "", form.announcement_title.trim() ? `*${form.announcement_title.trim()}*` : "", form.announcement_message.trim(), "", "Order here: " + window.location.origin].filter(Boolean).join("\n"))}`, "_blank", "noopener,noreferrer")}>Share announcement on WhatsApp</button>
         </div>
         <div className="payment-preview">
           <div className="payment-preview-copy"><span className="payment-preview-icon"><ReceiptText /></span><div><b>UPI Direct payment</b><small>After checkout, customers see an order-specific QR and submit their UPI reference. The kitchen verifies it before marking the order paid.</small><strong>{form.upi_id || "Add a UPI ID above to activate the QR"}</strong></div></div>
@@ -1933,8 +2001,8 @@ function MenuScreen({ items, categories, settings, onSaveSettings, onDaily, onAd
       <div className="daily-menu-toolbar"><div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>{shownCount} shown · {featuredCount} featured · {items.length - activeItems.length} archived</small></div><div className="daily-menu-actions"><button onClick={onRepeatYesterday}><RotateCcw size={14} /> Repeat yesterday</button><button onClick={onShowAll}><Check size={14} /> Show all</button><button onClick={onHideAll}><X size={14} /> Clear today</button></div></div>
       <section className="menu-grid">
         {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} data-menu-id={item.id} key={item.id}>
-          <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
-          <div className="menu-copy"><div><small className="menu-category-tag">{categoryName(item)}</small><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} / ${item.unit_label || "portion"} regular` : `${money(item.price)} / ${item.unit_label || "portion"}`}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
+          <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} loading="lazy" decoding="async" /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
+          <div className="menu-copy"><div><small className="menu-category-tag">{categoryName(item)}</small><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} / portion regular` : `${money(item.price)} / portion`}{portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)} per portion` : ""}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
           {item.description && <p className="menu-description">{item.description}</p>}
           <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} disabled={!item.is_active} onClick={() => onDaily(item, { is_available: !item.daily?.is_available, is_featured: item.daily?.is_available ? false : item.daily?.is_featured })}><Check size={14} /> {item.daily?.is_available ? "Shown" : "Hidden"}</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.is_active || !item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Today’s price</span><input type="number" min="0" placeholder={String(item.price)} disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.special_price ?? ""} onChange={(event) => onDaily(item, { special_price: event.target.value === "" ? null : Number(event.target.value) })} /></label><label><span>Portions</span><input type="number" min="0" placeholder="∞" disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
@@ -1974,16 +2042,19 @@ function InfoTip({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onCreateBackup, onRestoreBackup, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, storefrontSettings, whatsappNumber, onLarge, onDark, onSaveStorefront, onUploadBanner, onPrepareExport, onCreateBackup, onRestoreBackup, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
   customerCount: number;
   adminEmail: string;
   paymentSettings: AdminStoreSettings;
+  storefrontSettings: AdminStoreSettings;
   whatsappNumber: string;
   onLarge: (large: boolean) => void;
   onDark: (dark: boolean) => void;
+  onSaveStorefront: (settings: AdminStoreSettings) => void;
+  onUploadBanner: (file: File) => Promise<string>;
   onPrepareExport: (options: ExportOptions, format: ExportFormat) => Promise<File>;
   onCreateBackup: () => Promise<File>;
   onRestoreBackup: (backup: PortableBackup) => Promise<PortableRestoreResult>;
@@ -2013,6 +2084,11 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   const [contactBusy, setContactBusy] = useState(false);
   const [contactMessage, setContactMessage] = useState("");
   const [contactError, setContactError] = useState(false);
+  const [storeForm, setStoreForm] = useState(storefrontSettings);
+  useEffect(() => {
+    setStoreForm(storefrontSettings);
+    requestAnimationFrame(() => document.querySelectorAll<HTMLTextAreaElement>(".storefront-settings-card textarea.auto-grow").forEach(autoGrow));
+  }, [storefrontSettings]);
   const [exportBusy, setExportBusy] = useState<ExportFormat | "">("");
   const [preparedFile, setPreparedFile] = useState<File | null>(null);
   const [exportMessage, setExportMessage] = useState("");
@@ -2290,6 +2366,24 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
         <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><span className="page-title-with-info"><h1>Settings</h1><InfoTip label="About settings">Manage payments, appearance, exports and kitchen records securely.</InfoTip></span></div>
       </section>
       <section className="settings-grid">
+        <article className="settings-card storefront-settings-card">
+          <div className="settings-title"><span className="settings-icon"><Settings /></span><div><h2>Customer storefront</h2><small>Orders, customer message and announcements.</small></div></div>
+          <div className="settings-form">
+            <label className="ordering-toggle"><input type="checkbox" checked={storeForm.ordering_open} onChange={(event) => setStoreForm((current) => ({ ...current, ordering_open: event.target.checked }))} /><span><b>{storeForm.ordering_open ? "Orders open" : "Orders paused"}</b><small>Allow customers to place orders</small></span></label>
+            <label className="wide-setting-field"><span>Customer message</span><textarea className="auto-grow" rows={1} value={storeForm.hero_message} onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, hero_message: event.target.value }))} /></label>
+            <label className="ordering-toggle"><input type="checkbox" checked={storeForm.announcement_enabled} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_enabled: event.target.checked }))} /><span><b>Show announcement</b><small>Display an offer or update above the customer menu</small></span></label>
+            <label className="wide-setting-field"><span>Announcement headline</span><textarea className="auto-grow" rows={1} value={storeForm.announcement_title} maxLength={90} placeholder="For example: Sunday special — free delivery" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_title: event.target.value }))} /></label>
+            <label className="wide-setting-field"><span>Announcement details <small>Optional</small></span><textarea className="auto-grow" rows={1} value={storeForm.announcement_message} maxLength={180} placeholder="For example: Order before 5 PM. Limited portions available." onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_message: event.target.value }))} /></label>
+            <label className="wide-setting-field photo-upload">
+              <span><Camera size={18} /> Banner image <small>Optional</small></span>
+              <input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { const path = await onUploadBanner(file); setStoreForm((current) => ({ ...current, announcement_image_path: path })); } catch (error) { alert(error instanceof Error ? error.message : "Could not upload the banner image."); } finally { event.currentTarget.value = ""; } }} />
+              <div className="photo-drop banner-photo-drop">
+                {storeForm.announcement_image_path ? <><img src={`${photoApiBase}?key=${encodeURIComponent(storeForm.announcement_image_path)}`} alt="Selected announcement banner" /><small>Banner image attached. Save storefront to publish it.</small></> : <><Camera /><b>Choose banner from Photos or Files</b><small>Optional: add an offer poster, celebration image or kitchen announcement graphic.</small></>}
+              </div>
+            </label>
+            <button className="primary settings-save" onClick={() => onSaveStorefront(storeForm)}><Save size={17} /> Save storefront</button>
+          </div>
+        </article>
         <article className="settings-card account-settings-card">
           <div className="settings-title"><span className="settings-icon"><ShieldCheck /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Admin account</h2><InfoTip label="About admin account">Change the email or password for this signed-in administrator. Email changes may need confirmation from Supabase; the account keeps its admin permission because its secure user ID does not change.</InfoTip></span></div></div>
           <form className="settings-form account-settings-form" onSubmit={saveAccount}>
@@ -2521,7 +2615,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   const prefill = !('id' in draft) ? sessionStorage.getItem("neeru-prefill") : null;
   const prefillItem = prefill ? JSON.parse(prefill) as MenuItem : null;
   const initialOrderLines: OrderLine[] = draft.items?.length ? draft.items : prefillItem ? [{ menu_item_id: prefillItem.id, item_name: prefillItem.name, unit_price: Number(prefillItem.daily?.special_price ?? prefillItem.price), quantity: 1, unit_label: prefillItem.unit_label || "portion" }] : [];
-  const initialLineDetails = initialOrderLines.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+  const initialLineDetails = initialOrderLines.map((line) => `${line.item_name} × ${line.quantity} portion${line.quantity === 1 ? "" : "s"}${portionSummary(line.unit_label)}`).join(", ");
   const initialLineTotal = initialOrderLines.reduce((total, line) => total + Number(line.unit_price) * line.quantity, 0);
   const [orderLines, setOrderLines] = useState<OrderLine[]>(initialOrderLines);
   const [form, setForm] = useState<Draft>({ ...draft, items: initialOrderLines, order_details: initialLineDetails || draft.order_details, amount: initialOrderLines.length ? initialLineTotal : draft.amount });
@@ -2556,12 +2650,12 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
     const match = customers.find((profile) => profile.customer_name.toLowerCase() === name.trim().toLowerCase());
     if (match) setCustomerFlat(match.flat_number);
     setForm((current) => match
-      ? { ...current, customer_name: name, flat_number: match.flat_number, delivered_by: match.delivered_by }
+      ? { ...current, customer_name: name, flat_number: match.flat_number, customer_phone: match.customer_phone || current.customer_phone, delivered_by: match.delivered_by }
       : { ...current, customer_name: name });
   };
   const applyOrderLines = (next: OrderLine[]) => {
     const normalized = next.filter((line) => line.quantity > 0).map((line) => ({ ...line, quantity: Math.min(20, Math.max(1, line.quantity)) }));
-    const details = normalized.map((line) => `${line.item_name} × ${line.quantity}${line.unit_label !== "portion" ? ` (${line.unit_label} each)` : ""}`).join(", ");
+    const details = normalized.map((line) => `${line.item_name} × ${line.quantity} portion${line.quantity === 1 ? "" : "s"}${portionSummary(line.unit_label)}`).join(", ");
     const amount = normalized.reduce((total, line) => total + Number(line.unit_price) * line.quantity, 0);
     setOrderLines(normalized);
     setForm((current) => ({ ...current, items: normalized, order_details: details, amount }));
@@ -2571,6 +2665,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
     setForm((current) => ({
       ...current,
       customer_name: profile.customer_name,
+      customer_phone: profile.customer_phone || current.customer_phone,
       flat_number: profile.flat_number,
       delivered_by: profile.delivered_by,
     }));
@@ -2586,13 +2681,14 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
         <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{"id" in draft ? "Edit order" : "New order"}</h2><p>Customer, food and delivery details</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
         <div className="form-grid">
           <CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
+          <label><span>Customer phone <small>Optional</small></span><input type="tel" inputMode="numeric" value={form.customer_phone || ""} onChange={(event) => set("customer_phone", event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" /></label>
           <div className={`admin-flat-fields ${flatWarning ? "has-warning" : ""}`}>
             <label><span>Tower</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required={!allowNoWing}><option value="" disabled={!allowNoWing}>{allowNoWing ? "No tower (existing)" : "Choose"}</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Tower {wing}</option>)}</select></label>
             <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
             {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
           </div>
-          <div className="wide food-picker"><label>Choose dishes</label><div className="food-options">{menuItems.filter((item) => item.is_active).map((item) => { const selected = orderLines.find((line) => line.menu_item_id === item.id); return <button type="button" key={item.id} className={selected ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? `${money(Number(item.daily?.special_price ?? item.price))} / ${item.unit_label || "portion"}` : ""}</small>{selected && <em>{selected.quantity}×</em>}</button>; })}</div></div>
-          <div className="wide admin-order-lines"><span className="admin-order-lines-title">Dish quantities</span>{orderLines.length ? orderLines.map((line) => <article key={line.menu_item_id}><span><b>{line.item_name}</b><small>{money(line.unit_price)} / {line.unit_label}</small></span><div className="admin-line-quantity"><button type="button" aria-label={`Decrease ${line.item_name} quantity`} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity - 1 } : entry))}><Minus /></button><b>{line.quantity}</b><button type="button" aria-label={`Increase ${line.item_name} quantity`} disabled={line.quantity >= 20} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity + 1 } : entry))}><Plus /></button></div><strong>{money(line.unit_price * line.quantity)}</strong><button type="button" aria-label={`Remove ${line.item_name}`} className="remove-order-line" onClick={() => applyOrderLines(orderLines.filter((entry) => entry.menu_item_id !== line.menu_item_id))}><X /></button></article>) : <p>Tap a dish above to add it, then set the quantity here.</p>}</div>
+          <div className="wide food-picker"><label>Choose dishes</label><div className="food-options">{menuItems.filter((item) => item.is_active).map((item) => { const selected = orderLines.find((line) => line.menu_item_id === item.id); return <button type="button" key={item.id} className={selected ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" loading="lazy" decoding="async" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? `${money(Number(item.daily?.special_price ?? item.price))} / portion${portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)}` : ""}` : ""}</small>{selected && <em>{selected.quantity}×</em>}</button>; })}</div></div>
+          <div className="wide admin-order-lines"><span className="admin-order-lines-title">Portions ordered</span>{orderLines.length ? orderLines.map((line) => <article key={line.menu_item_id}><span><b>{line.item_name}</b><small>{money(line.unit_price)} / portion{portionContents(line.unit_label) ? ` · ${portionContents(line.unit_label)} per portion` : ""}</small></span><div className="admin-line-quantity"><button type="button" aria-label={`Decrease ${line.item_name} portions`} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity - 1 } : entry))}><Minus /></button><b>{line.quantity}</b><button type="button" aria-label={`Increase ${line.item_name} portions`} disabled={line.quantity >= 20} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity + 1 } : entry))}><Plus /></button></div><strong>{money(line.unit_price * line.quantity)}</strong><button type="button" aria-label={`Remove ${line.item_name}`} className="remove-order-line" onClick={() => applyOrderLines(orderLines.filter((entry) => entry.menu_item_id !== line.menu_item_id))}><X /></button></article>) : <p>Tap a dish above to add it, then set the number of portions here.</p>}</div>
           <Field label="Order summary" value={form.order_details} onChange={(v) => set("order_details", v)} wide />
           <TimeField value={form.delivery_time || ""} onChange={(v) => set("delivery_time", v)} />
           <Field label="Amount (₹)" type="number" value={String(form.amount)} onChange={(v) => set("amount", Number(v))} />
@@ -2730,27 +2826,32 @@ function CategoryPromotionModal({ category, items, onClose, onPrepare }: { categ
   }
   return <div className="modal-bg"><section className="modal category-promotion-modal">
     <div className="modal-head"><div><span className="eyebrow">SHARE CATEGORY MENU</span><h2>{category.name}</h2><p>Choose the large featured dish. Every other dish stays compact and easy to scan.</p></div><button className="icon-button" onClick={onClose}><X /></button></div>
-    {hero && <div className="promotion-preview">{hero.photo_url ? <img src={hero.photo_url} alt={hero.name} /> : <span><ChefHat /></span>}<div><small>FEATURED DISH</small><b>{hero.name}</b><strong>{money(Number(hero.daily?.special_price ?? hero.price))} / {hero.unit_label || "portion"}</strong></div></div>}
+    {hero && <div className="promotion-preview">{hero.photo_url ? <img src={hero.photo_url} alt={hero.name} /> : <span><ChefHat /></span>}<div><small>FEATURED DISH</small><b>{hero.name}</b><strong>{money(Number(hero.daily?.special_price ?? hero.price))} / portion{portionContents(hero.unit_label) ? ` · ${portionContents(hero.unit_label)} per portion` : ""}</strong></div></div>}
     <div className="promotion-form category-promotion-form">
       <label className="wide"><span>Menu introduction</span><textarea value={message} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} /></label>
       <label className="delivery-date-field"><span>Delivery date <small>Optional</small></span><input type="date" min={today()} value={deliveryDate} onChange={(event) => { setDeliveryDate(event.target.value); setPrepared(null); }} /></label>
       <TimeField label="Delivery time" optional value={deliveryTime} onChange={(value) => { setDeliveryTime(value); setPrepared(null); }} />
       <TimeField label="Order cut-off time" optional className="wide" value={until} onChange={(value) => { setUntil(value); setPrepared(null); }} />
     </div>
-    <div className="category-hero-list">{items.map((item) => <button type="button" className={item.id === heroId ? "selected" : ""} onClick={() => { setHeroId(item.id); setPrepared(null); }} key={item.id}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<span><b>{item.name}</b><small>{money(Number(item.daily?.special_price ?? item.price))} / {item.unit_label || "portion"}</small></span><i /></button>)}</div>
+    <div className="category-hero-list">{items.map((item) => <button type="button" className={item.id === heroId ? "selected" : ""} onClick={() => { setHeroId(item.id); setPrepared(null); }} key={item.id}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<span><b>{item.name}</b><small>{money(Number(item.daily?.special_price ?? item.price))} / portion{portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)} per portion` : ""}</small></span><i /></button>)}</div>
     {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
     {prepared && <a className="promotion-ready-link" href={prepared.url} target="_blank" rel="noreferrer"><ExternalLink /> Preview shared category</a>}
     <div className="modal-actions"><button className="cancel" onClick={onClose}>Close</button><span />{prepared ? <button className="save whatsapp-share-button" onClick={share}><MessageCircle /> Share category</button> : <button className="save" disabled={busy || !heroId || !message.trim()} onClick={prepare}><Check /> {busy ? "Preparing…" : "Prepare category"}</button>}</div>
   </section></div>;
 }
 
-function MenuItemForm({ item, categories, onClose, onSave }: { item: MenuItem | null; categories: DishCategory[]; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label">, photo?: File, existing?: MenuItem) => void }) {
+function MenuItemForm({ item, categories, onClose, onSave }: { item: MenuItem | null; categories: DishCategory[]; onClose: () => void; onSave: (values: Pick<MenuItem, "name" | "price" | "description" | "spice_level" | "category_id" | "unit_label"> & { category_ids?: string[] }, photo?: File, existing?: MenuItem) => void }) {
+  const savedPortionContents = item?.unit_label?.trim() || "portion";
+  const savedPieceCount = /^(\d+)\s*(?:pc|pcs|piece|pieces)$/i.exec(savedPortionContents)?.[1];
   const [name, setName] = useState(item?.name || "");
   const [price, setPrice] = useState(item?.price || 0);
   const [description, setDescription] = useState(item?.description || "");
   const [spiceLevel, setSpiceLevel] = useState<MenuItem["spice_level"]>(item?.spice_level || "mild");
   const [categoryId, setCategoryId] = useState(item?.category_id || categories.find((category) => category.slug === "other-dishes")?.id || categories[0]?.id || "");
-  const [unitLabel, setUnitLabel] = useState(item?.unit_label || "portion");
+  const [extraCategoryIds, setExtraCategoryIds] = useState<string[]>((item?.category_ids || []).filter((id) => id !== item?.category_id));
+  const [portionType, setPortionType] = useState<"serving" | "pieces" | "custom">(savedPortionContents === "portion" ? "serving" : savedPieceCount ? "pieces" : "custom");
+  const [piecesPerPortion, setPiecesPerPortion] = useState(savedPieceCount || "2");
+  const [customPortionContents, setCustomPortionContents] = useState(savedPortionContents === "portion" || savedPieceCount ? "" : savedPortionContents);
   const [photo, setPhoto] = useState<File>();
   const [preview, setPreview] = useState<string | undefined>(item?.photo_url);
   const [saving, setSaving] = useState(false);
@@ -2758,16 +2859,24 @@ function MenuItemForm({ item, categories, onClose, onSave }: { item: MenuItem | 
     event.preventDefault();
     setSaving(true);
     try {
-      await onSave({ name, price, description, spice_level: spiceLevel, category_id: categoryId || null, unit_label: unitLabel }, photo, item || undefined);
+      const unitLabel = portionType === "pieces"
+        ? `${Math.max(1, Math.floor(Number(piecesPerPortion) || 1))} pcs`
+        : portionType === "custom" ? customPortionContents.trim() || "portion" : "portion";
+      await onSave({ name, price, description, spice_level: spiceLevel, category_id: categoryId || null, category_ids: [categoryId, ...extraCategoryIds].filter(Boolean), unit_label: unitLabel }, photo, item || undefined);
     } finally {
       setSaving(false);
     }
   }
-  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={submit}><div className="modal-head"><div><span className="eyebrow">DISH CATALOGUE</span><h2>{item ? "Edit dish" : "Add dish"}</h2><p>Save the category, selling unit and customer-facing dish details.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Dish name" value={name} onChange={setName} /><Field label="Price (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label><span>Category</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)} required><option value="" disabled>Choose category</option>{categories.filter((category) => category.is_active || category.id === item?.category_id).map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><Field label="Selling unit" value={unitLabel} onChange={setUnitLabel} /><div className="wide field-hint"><Info size={15} /><span>Examples: <b>2 pcs</b>, <b>plate</b>, <b>bowl</b> or <b>500 g</b>. The entered price applies to one of these units.</span></div><Field label="Short description" value={description} onChange={setDescription} wide /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Dish photo</span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); }} /><div className="photo-drop menu-photo-drop">{preview ? <><img src={preview} alt="Selected dish" /><small>{photo ? `${readableBytes(photo.size)} selected · automatically resized and compressed when saved` : "Current dish photo"}</small></> : <><Camera /><b>Take or choose any phone photo</b><small>Large and high-resolution photos are automatically resized to a fast-loading WebP image.</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose} disabled={saving}>Cancel</button><button className="save" disabled={saving}>{saving ? <span className="loader" /> : item ? <Check size={19} /> : <Plus size={19} />} {saving ? photo ? "Optimizing photo…" : "Saving…" : item ? "Save dish" : "Add dish"}</button></div></form></div>;
+  const visibleCategories = categories.filter((category) => category.is_active || category.id === item?.category_id);
+  return <div className="modal-bg"><form className="modal menu-modal" onSubmit={submit}><div className="modal-head"><div><span className="eyebrow">DISH CATALOGUE</span><h2>{item ? "Edit dish" : "Add dish"}</h2><p>Every customer order is a portion. Choose what one portion means for this dish.</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div><div className="form-grid"><Field label="Dish name" value={name} onChange={setName} /><Field label="Price per portion (₹)" value={String(price)} onChange={(v) => setPrice(Number(v))} type="number" /><label><span>Primary category</span><select value={categoryId} onChange={(event) => { setCategoryId(event.target.value); setExtraCategoryIds((ids) => ids.filter((id) => id !== event.target.value)); }} required><option value="" disabled>Choose category</option>{visibleCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label><span>What is one portion?</span><select value={portionType} onChange={(event) => setPortionType(event.target.value as "serving" | "pieces" | "custom")}><option value="serving">One serving (pulao, rice, bowl)</option><option value="pieces">A set number of pieces (paranthas, chilla)</option><option value="custom">Another serving detail</option></select></label><fieldset className="wide category-overlaps"><legend>Also show under <small>Optional</small></legend><div>{visibleCategories.filter((category) => category.id !== categoryId).map((category) => <label key={category.id}><input type="checkbox" checked={extraCategoryIds.includes(category.id)} onChange={() => setExtraCategoryIds((ids) => ids.includes(category.id) ? ids.filter((id) => id !== category.id) : [...ids, category.id])} /> {category.name}</label>)}</div></fieldset>{portionType === "pieces" && <Field label="Pieces in one portion" value={piecesPerPortion} onChange={setPiecesPerPortion} type="number" />}{portionType === "custom" && <Field label="What one portion includes" value={customPortionContents} onChange={setCustomPortionContents} required={false} />}<div className="wide field-hint"><Info size={15} /><span><b>Customer rule:</b> they always choose the number of <b>portions</b>. {portionType === "pieces" ? <>One portion of this dish will show as <b>{Math.max(1, Math.floor(Number(piecesPerPortion) || 1))} pcs</b>.</> : portionType === "custom" ? <>The custom detail explains the portion; the price is still per portion.</> : <>Use this for a single serving such as pulao, rice or khichdi.</>}</span></div><Field label="Short description (optional)" value={description} onChange={setDescription} wide textarea required={false} /><label><span>Spice level</span><select value={spiceLevel} onChange={(event) => setSpiceLevel(event.target.value as MenuItem["spice_level"])}><option value="mild">Mild</option><option value="medium">Medium</option><option value="spicy">Spicy</option></select></label><label className="wide photo-upload"><span><Camera size={18} /> Dish photo <small>Optional</small></span><input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif,.jpg,.jpeg,.png,.webp,.heic,.heif" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPreview(URL.createObjectURL(file)); e.currentTarget.value = ""; }} /><div className="photo-drop menu-photo-drop">{preview ? <><img src={preview} alt="Selected dish" /><small>{photo ? `${readableBytes(photo.size)} selected · automatically resized and compressed when saved` : "Current dish photo"}</small></> : <><Camera /><b>Choose from Photos or Files</b><small>On a phone, select Photo Library, Take Photo, or Files. JPG, PNG, WebP and HEIC work.</small></>}</div></label></div><div className="modal-actions"><span /><button type="button" className="cancel" onClick={onClose} disabled={saving}>Cancel</button><button className="save" disabled={saving}>{saving ? <span className="loader" /> : item ? <Check size={19} /> : <Plus size={19} />} {saving ? photo ? "Optimizing photo…" : "Saving…" : item ? "Save dish" : "Add dish"}</button></div></form></div>;
 }
 
-function Field({ label, value, onChange, type = "text", wide = false, textarea = false, autoFocus = false }: { label: string; value: string; onChange: (v: string) => void; type?: string; wide?: boolean; textarea?: boolean; autoFocus?: boolean }) {
-  return <label className={wide ? "wide" : ""}><span>{label}</span>{textarea ? <textarea value={value} onChange={(e) => onChange(e.target.value)} /> : <input autoFocus={autoFocus} type={type} value={value} onChange={(e) => onChange(e.target.value)} required={!label.startsWith("Remarks")} />}</label>;
+function Field({ label, value, onChange, type = "text", wide = false, textarea = false, autoFocus = false, required = true }: { label: string; value: string; onChange: (v: string) => void; type?: string; wide?: boolean; textarea?: boolean; autoFocus?: boolean; required?: boolean }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    if (textareaRef.current) autoGrow(textareaRef.current);
+  }, [textarea, value]);
+  return <label className={wide ? "wide" : ""}><span>{label}</span>{textarea ? <textarea ref={textareaRef} className="auto-grow" rows={3} value={value} onInput={(e) => autoGrow(e.currentTarget)} onChange={(e) => onChange(e.target.value)} required={required} /> : <input autoFocus={autoFocus} type={type} value={value} onChange={(e) => onChange(e.target.value)} required={required} />}</label>;
 }
 function Choice({ label, options, value, onChange }: { label: string; options: string[][]; value: string; onChange: (v: string) => void }) {
   return <fieldset><legend>{label}</legend><div className="choice">{options.map(([key, text]) => <button type="button" className={value === key ? "selected" : ""} key={key} onClick={() => onChange(key)}>{key === "nanny" ? <CircleUserRound size={18} /> : <UtensilsCrossed size={18} />}{text}</button>)}</div></fieldset>;

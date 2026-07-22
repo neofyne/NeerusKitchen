@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "neerushomekitchen",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-07-22",
+  "r2_buckets": [
+    {
+      "binding": "BANNER_PHOTOS",
+      "bucket_name": "neerus-kitchen-banners"
+    }
+  ],
+  "vars": {
+    "SUPABASE_URL": "https://aqwczyplrqpdbxkfflhj.supabase.co",
+    "SUPABASE_ANON_KEY": "sb_publishable_6wohaeoNLejgXtAZfteAuQ_ibh4vcGK"
+  }
+}

@@ -160,8 +160,9 @@ begin
     values (v_order_id, v_menu.id, v_menu.name, v_price, v_quantity, v_menu.unit_label);
     v_total := v_total + (v_price * v_quantity);
     v_details := concat_ws(', ', nullif(v_details, ''),
-      format('%s × %s%s', v_menu.name, v_quantity,
-        case when v_menu.unit_label <> 'portion' then format(' (%s each)', v_menu.unit_label) else '' end));
+      format('%s × %s portion%s%s', v_menu.name, v_quantity,
+        case when v_quantity <> 1 then 's' else '' end,
+        case when v_menu.unit_label <> 'portion' then format(' (%s per portion)', v_menu.unit_label) else '' end));
     v_line_count := v_line_count + 1;
   end loop;
 

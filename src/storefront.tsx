@@ -3,6 +3,7 @@ import type { Session } from "@supabase/supabase-js";
 import QRCode from "qrcode";
 import {
   ArrowLeft,
+  Banknote,
   Check,
   ChefHat,
   ChevronRight,
@@ -16,6 +17,7 @@ import {
   Plus,
   ReceiptText,
   Search,
+  ShieldCheck,
   ShoppingBag,
   Smartphone,
   Sparkles,
@@ -23,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import { storefrontSupabase as supabase } from "./supabase";
+import { useAutoGrowingTextareas } from "./autoGrow";
 import { ceilTimeToQuarter, formatTime12 } from "./promotionFormat";
 
 type StoreView = "menu" | "cart" | "orders" | "account";
@@ -42,6 +45,7 @@ type StoreMenuItem = {
   promotion_message: string;
   promotion_until: string | null;
   category_id: string | null;
+  category_ids?: string[];
   unit_label: string;
 };
 
@@ -71,6 +75,7 @@ type CustomerOrder = {
   stage: string;
   payment_status: string;
   payment_reference: string | null;
+  payment_method: "upi" | "cash";
   order_details: string;
   delivery_time: string | null;
 };
@@ -82,6 +87,10 @@ type StoreSettings = {
   merchant_name: string;
   order_cutoff: string | null;
   whatsapp_number: string;
+  announcement_enabled: boolean;
+  announcement_title: string;
+  announcement_message: string;
+  announcement_image_path: string;
 };
 
 type OrderAlertResult = {
@@ -129,6 +138,10 @@ const stageLabels: Record<string, string> = {
   delivered: "Delivered",
 };
 const customerStage = (stage: string) => stage === "delivered" ? "delivered" : "new";
+const portionContents = (unitLabel?: string | null) => {
+  const value = unitLabel?.trim() || "";
+  return value && value.toLowerCase() !== "portion" ? value : "";
+};
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 const defaultSettings: StoreSettings = {
@@ -137,7 +150,11 @@ const defaultSettings: StoreSettings = {
   upi_id: "krsnasolo@okicici",
   merchant_name: "Neeru's Home Kitchen",
   order_cutoff: null,
-  whatsapp_number: "918483000013",
+  whatsapp_number: "918684000013",
+  announcement_enabled: false,
+  announcement_title: "",
+  announcement_message: "",
+  announcement_image_path: "",
 };
 
 const localToday = () => {
@@ -170,6 +187,7 @@ const savedCart = (): Record<string, number> => {
   }
 };
 export function Storefront() {
+  useAutoGrowingTextareas();
   const [sharedDishId] = useState(() => new URLSearchParams(window.location.search).get("dish") || "");
   const [sharedCategoryPath] = useState(() => {
     const match = window.location.pathname.match(/^\/c\/([^/]+)(?:\/([^/]+))?/);
@@ -186,6 +204,7 @@ export function Storefront() {
   const [settings, setSettings] = useState<StoreSettings>(defaultSettings);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
   const [authOpen, setAuthOpen] = useState(false);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [placedOrder, setPlacedOrder] = useState<CustomerOrder | null>(null);
@@ -224,12 +243,15 @@ export function Storefront() {
   async function loadStore() {
     if (!supabase) return setLoading(false);
     setLoading(true);
-    const [{ data: menu }, { data: daily }, { data: configuration }, categoryResult] = await Promise.all([
+    const [{ data: menu }, { data: daily }, { data: configuration }, categoryResult, categoryLinks] = await Promise.all([
       supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path,category_id,unit_label").eq("is_active", true).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", localToday()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number,announcement_enabled,announcement_title,announcement_message,announcement_image_path").eq("id", 1).maybeSingle(),
       supabase.from("dish_categories").select("id,name,slug,description,sort_order").eq("is_active", true).order("sort_order").order("name"),
+      supabase.from("menu_item_categories").select("menu_item_id,category_id"),
     ]);
+    const categoryIdsByItem = new Map<string, string[]>();
+    for (const link of categoryLinks.data || []) categoryIdsByItem.set(link.menu_item_id, [...(categoryIdsByItem.get(link.menu_item_id) || []), link.category_id]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
     if (!menu) {
       setItems(starterCatalog);
@@ -251,6 +273,7 @@ export function Storefront() {
         promotion_message: today?.promotion_message ?? "",
         promotion_until: today?.promotion_until?.slice(0, 5) ?? null,
         category_id: row.category_id || null,
+        category_ids: categoryIdsByItem.get(row.id) || (row.category_id ? [row.category_id] : []),
         unit_label: row.unit_label || "portion",
       }];
     }));
@@ -274,25 +297,26 @@ export function Storefront() {
 
   async function loadOrders() {
     if (!supabase || !session) return;
-    const { data } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,order_details,delivery_time").eq("customer_id", session.user.id).order("created_at", { ascending: false }).limit(30);
+    const { data } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,payment_method,order_details,delivery_time").eq("customer_id", session.user.id).order("created_at", { ascending: false }).limit(30);
     setOrders((data || []) as CustomerOrder[]);
   }
 
+  const itemHasCategory = (item: StoreMenuItem, categoryId: string) => (item.category_ids || [item.category_id]).includes(categoryId);
   const visibleItems = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return items.filter((item) => !query || `${item.name} ${item.description}`.toLowerCase().includes(query));
-  }, [items, search]);
+    return items.filter((item) => (!query || `${item.name} ${item.description}`.toLowerCase().includes(query)) && (categoryFilter === "all" || itemHasCategory(item, categoryFilter)));
+  }, [items, search, categoryFilter]);
   const menuGroups = useMemo(() => {
-    const known = categories.map((category) => ({ category, items: visibleItems.filter((item) => item.category_id === category.id) })).filter((group) => group.items.length);
+    const known = categories.map((category) => ({ category, items: visibleItems.filter((item) => categoryFilter === "all" ? item.category_id === category.id : itemHasCategory(item, category.id)) })).filter((group) => group.items.length);
     const knownIds = new Set(categories.map((category) => category.id));
     const uncategorized = visibleItems.filter((item) => !item.category_id || !knownIds.has(item.category_id));
     return uncategorized.length ? [...known, { category: { id: "other", name: "Other dishes", slug: "other-dishes", description: "More fresh dishes from our home kitchen.", sort_order: 999 }, items: uncategorized }] : known;
-  }, [categories, visibleItems]);
+  }, [categories, visibleItems, categoryFilter]);
   const featured = items.filter((item) => item.is_featured);
   const heroItem = featured[0] || items[0];
   const sharedDish = items.find((item) => item.id === sharedDishId);
   const sharedCategory = categories.find((category) => category.slug === sharedCategoryPath.categorySlug);
-  const sharedCategoryItems = sharedCategory ? items.filter((item) => item.category_id === sharedCategory.id) : [];
+  const sharedCategoryItems = sharedCategory ? items.filter((item) => itemHasCategory(item, sharedCategory.id)) : [];
   const sharedCategoryHero = sharedCategoryItems.find((item) => slugify(item.name) === sharedCategoryPath.heroSlug) || sharedCategoryItems[0];
   const currentTime = new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Kolkata" }).format(new Date());
   const acceptingOrders = settings.ordering_open && (!settings.order_cutoff || currentTime <= settings.order_cutoff.slice(0, 5));
@@ -361,13 +385,14 @@ export function Storefront() {
             <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${acceptingOrders ? "" : "closed"}`}><i />{acceptingOrders ? "Taking orders today" : settings.ordering_open ? "Today’s order cutoff has passed" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
             <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} decoding="async" /> : <UtensilsCrossed />}</div>
           </section>
+          {settings.announcement_enabled && (settings.announcement_title || settings.announcement_message || settings.announcement_image_path) && <section className="store-announcement">{settings.announcement_image_path && <img src={`/api/photos?key=${encodeURIComponent(settings.announcement_image_path)}`} alt="" loading="lazy" decoding="async" />}<strong>{settings.announcement_title}</strong>{settings.announcement_message && <span>{settings.announcement_message}</span>}</section>}
 
           {featured.length > 0 && <section className="featured-section"><div className="store-section-title"><div><span className="store-eyebrow"><Flame /> KITCHEN FAVOURITES</span><h2>Featured today</h2></div></div><div className="featured-row">{featured.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} featured />)}</div></section>}
 
           <section className="menu-section">
             <div className="store-section-title"><div><span className="store-eyebrow">FRESHLY PREPARED</span><h2>Today’s menu</h2></div><span>{visibleItems.length} dishes</span></div>
             <div className="store-filters"><label><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search today’s vegetarian menu" /></label></div>
-            {!search && categories.length > 1 && <div className="store-category-chips">{categories.map((category) => <a href={`#category-${category.slug}`} key={category.id}>{category.name}</a>)}</div>}
+            {!search && categories.length > 1 && <div className="store-category-chips"><button className={categoryFilter === "all" ? "active" : ""} onClick={() => setCategoryFilter("all")}>All</button>{categories.map((category) => <button className={categoryFilter === category.id ? "active" : ""} onClick={() => setCategoryFilter(category.id)} key={category.id}>{category.name}</button>)}</div>}
             {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-groups">{menuGroups.map((group) => <section id={`category-${group.category.slug}`} className="store-category-section" key={group.category.id}><div className="store-category-heading"><span><b>{group.category.name}</b><small>{group.category.description}</small></span><em>{group.items.length} dish{group.items.length === 1 ? "" : "es"}</em></div><div className="store-menu-grid">{group.items.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div></section>)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
           </section>
           </>}
@@ -382,28 +407,29 @@ export function Storefront() {
         <button className={view === "menu" ? "active" : ""} onClick={() => go("menu")}><Home /><span>Home</span></button>
         <button className={view === "orders" ? "active" : ""} onClick={() => go("orders")}><ReceiptText /><span>My orders</span></button>
         <button className={`cart-nav ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")}><span className="cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span><span>Cart</span></button>
+        {whatsappHref && <a className="store-whatsapp-nav" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Home Kitchen on WhatsApp"><MessageCircle /><span>WhatsApp</span></a>}
       </nav>
 
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Home Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order, alert) => { setCheckoutOpen(false); setPlacedOrder(order); setPlacedAlert(alert); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} alert={placedAlert} onClose={() => { setPlacedOrder(null); setPlacedAlert(null); go("orders"); }} />}
-      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Home Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>WhatsApp us</b><small>{whatsappDisplay}</small></span></a>}
       </div>
     </div>
   );
 }
 
 function StoreLogo() {
-  return <span className="store-logo"><svg viewBox="0 0 48 48"><path d="M17 21c-3-3 2-5 0-9M24 21c-3-3 2-5 0-10M31 21c-3-3 2-5 0-9" /><path className="fill" d="M10.5 25.5h27c-.8 8.2-6.1 12.5-13.5 12.5s-12.7-4.3-13.5-12.5Z" /><path d="M8.5 25.5h31" /></svg></span>;
+  return <span className="store-logo" aria-hidden="true"><svg viewBox="0 0 48 48"><path className="logo-steam" d="M24 9c-2 2 1 3-1 6M30 8c-2 2 1 3-1 6" /><path className="logo-n" d="M12 35V15l20 20V15" /><path className="logo-fork" d="M8 15v4m3-4v4m3-4v4m3-4v4" /><path className="logo-spoon" d="M32 15c0-2.8 1.7-4.8 4-4.8s4 2 4 4.8-1.7 4.7-4 4.7-4-1.9-4-4.7Z" /></svg></span>;
 }
 
 function SharedDishMenu({ item, quantity, onQuantity, onCart }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; onCart: () => void }) {
   const soldOut = item.portions_available === 0;
   const addDish = () => { onQuantity(item.id, Math.max(1, quantity)); onCart(); };
+  const contents = portionContents(item.unit_label);
   return <section className="shared-dish-page">
     <article className="shared-dish-banner">
       <div className="shared-dish-image">{item.image_url ? <img src={item.image_url} alt={item.name} decoding="async" /> : <ChefHat />}</div>
-      <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{item.name}</h1><p>{item.promotion_message || item.description}</p><div className="shared-dish-facts"><strong>{formatMoney(item.price)}</strong><small>per {item.unit_label}</small>{item.portions_available !== null && <span>{item.portions_available > 0 ? `Only ${item.portions_available} portions today` : "Sold out"}</span>}{item.promotion_until && <span>Order before {formatTime12(item.promotion_until)}</span>}</div><button className="store-primary" disabled={soldOut} onClick={addDish}>{soldOut ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
+      <div className="shared-dish-copy"><span className="store-eyebrow"><MessageCircle /> SHARED FROM NEERU’S KITCHEN</span><h1>{item.name}</h1><p>{item.promotion_message || item.description}</p><div className="shared-dish-facts"><strong>{formatMoney(item.price)}</strong><small>per portion</small>{contents && <span>{contents} per portion</span>}{item.portions_available !== null && <span>{item.portions_available > 0 ? `Only ${item.portions_available} portions today` : "Sold out"}</span>}{item.promotion_until && <span>Order before {formatTime12(item.promotion_until)}</span>}</div><button className="store-primary" disabled={soldOut} onClick={addDish}>{soldOut ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div>
     </article>
     <div className="shared-dish-footer"><span>This link was prepared specially for {item.name}.</span><a href="/">Browse the full menu</a></div>
   </section>;
@@ -415,26 +441,27 @@ function SharedCategoryMenu({ category, items, hero, cart, onQuantity, onCart }:
   const addHero = () => { onQuantity(hero.id, Math.max(1, heroQuantity)); onCart(); };
   return <section className="shared-category-page">
     <div className="shared-category-intro"><span className="store-eyebrow"><MessageCircle /> SHARED MENU</span><h1>{category.name}</h1><p>{category.description || "Made fresh after you order, so every portion is prepared just for you."}</p></div>
-    <article className="shared-category-hero"><div className="shared-category-hero-image">{hero.image_url ? <img src={hero.image_url} alt={hero.name} decoding="async" /> : <ChefHat />}</div><div className="shared-category-hero-copy"><span>FEATURED DISH</span><h2>{hero.name}</h2><p>{hero.promotion_message || hero.description}</p><div className="shared-category-hero-facts"><strong>{formatMoney(hero.price)}</strong><small>per {hero.unit_label}</small>{hero.portions_available !== null && <em>{hero.portions_available > 0 ? `Only ${hero.portions_available} portions today` : "Sold out"}</em>}{hero.promotion_until && <em>Order before {formatTime12(hero.promotion_until)}</em>}</div><button className="store-primary" disabled={hero.portions_available === 0} onClick={addHero}>{hero.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div></article>
-    {others.length > 0 && <div className="shared-category-list"><div className="shared-category-list-head"><b>More from {category.name}</b><span>{others.length} more dish{others.length === 1 ? "" : "es"}</span></div>{others.map((item) => { const quantity = cart[item.id] || 0; const soldOut = item.portions_available === 0; return <article key={item.id}><div className="shared-category-thumb">{item.image_url ? <img src={item.image_url} alt="" loading="lazy" decoding="async" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{item.description}</small><strong>{formatMoney(item.price)} / {item.unit_label}</strong></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)} aria-label={`Decrease ${item.name} quantity`}><Minus /></button><b>{quantity}</b><button disabled={soldOut || quantity >= 20} onClick={() => onQuantity(item.id, quantity + 1)} aria-label={`Increase ${item.name} quantity`}><Plus /></button></div> : <button className="compact-add" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Sold out" : <>Add <Plus /></>}</button>}</article>; })}</div>}
+    <article className="shared-category-hero"><div className="shared-category-hero-image">{hero.image_url ? <img src={hero.image_url} alt={hero.name} decoding="async" /> : <ChefHat />}</div><div className="shared-category-hero-copy"><span>FEATURED DISH</span><h2>{hero.name}</h2><p>{hero.promotion_message || hero.description}</p><div className="shared-category-hero-facts"><strong>{formatMoney(hero.price)}</strong><small>per portion</small>{portionContents(hero.unit_label) && <em>{portionContents(hero.unit_label)} per portion</em>}{hero.portions_available !== null && <em>{hero.portions_available > 0 ? `Only ${hero.portions_available} portions today` : "Sold out"}</em>}{hero.promotion_until && <em>Order before {formatTime12(hero.promotion_until)}</em>}</div><button className="store-primary" disabled={hero.portions_available === 0} onClick={addHero}>{hero.portions_available === 0 ? "Unavailable today" : <>Add &amp; order now <ChevronRight /></>}</button></div></article>
+    {others.length > 0 && <div className="shared-category-list"><div className="shared-category-list-head"><b>More from {category.name}</b><span>{others.length} more dish{others.length === 1 ? "" : "es"}</span></div>{others.map((item) => { const quantity = cart[item.id] || 0; const soldOut = item.portions_available === 0; const contents = portionContents(item.unit_label); return <article key={item.id}><div className="shared-category-thumb">{item.image_url ? <img src={item.image_url} alt="" loading="lazy" decoding="async" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{[item.description, contents && `${contents} per portion`].filter(Boolean).join(" · ")}</small><strong>{formatMoney(item.price)} / portion</strong></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)} aria-label={`Decrease ${item.name} portions`}><Minus /></button><b>{quantity}</b><button disabled={soldOut || quantity >= 20} onClick={() => onQuantity(item.id, quantity + 1)} aria-label={`Increase ${item.name} portions`}><Plus /></button></div> : <button className="compact-add" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Sold out" : <>Add <Plus /></>}</button>}</article>; })}</div>}
     <div className="shared-category-footer"><span>Made fresh after you order.</span><button onClick={onCart}><ShoppingBag /> View cart</button></div>
   </section>;
 }
 
 function FoodCard({ item, quantity, onQuantity, featured = false }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; featured?: boolean }) {
   const soldOut = item.portions_available === 0;
+  const contents = portionContents(item.unit_label);
   return <article className={`store-food-card ${featured ? "featured-card" : ""} ${soldOut ? "sold-out" : ""}`}>
     <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} loading="lazy" decoding="async" /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
-    <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{item.description}</p><div className="food-card-bottom"><span className="dish-price"><strong>{formatMoney(item.price)}</strong><small>/ {item.unit_label}</small></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
+    <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{[item.description, contents && `${contents} per portion`].filter(Boolean).join(" · ")}</p><div className="food-card-bottom"><span className="dish-price"><strong>{formatMoney(item.price)}</strong><small>/ portion</small></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)} aria-label={`Decrease ${item.name} portions`}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)} aria-label={`Increase ${item.name} portions`}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
   </article>;
 }
 
 function CartView({ lines, total, orderingOpen, onQuantity, onBack, onCheckout }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; orderingOpen: boolean; onQuantity: (id: string, quantity: number) => void; onBack: () => void; onCheckout: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Continue browsing</button><div className="subpage-heading"><span className="store-eyebrow">YOUR SELECTION</span><h1>Your cart</h1><p>Fresh food is prepared after your order is confirmed.</p></div>{lines.length ? <><div className="cart-lines">{lines.map((item) => <article key={item.id}><div>{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{formatMoney(item.price)} / {item.unit_label}</small></span><div className="quantity"><button onClick={() => onQuantity(item.id, item.quantity - 1)}><Minus /></button><b>{item.quantity}</b><button onClick={() => onQuantity(item.id, item.quantity + 1)}><Plus /></button></div><strong>{formatMoney(item.price * item.quantity)}</strong></article>)}</div><div className="cart-summary"><span><b>Total</b><small>Payment instructions appear after ordering</small></span><strong>{formatMoney(total)}</strong></div><button className="store-primary checkout-button" disabled={!orderingOpen} onClick={onCheckout}>{orderingOpen ? <>Continue to delivery <ChevronRight /></> : "Orders are paused today"}</button></> : <div className="store-empty"><ShoppingBag /><b>Your cart is empty</b><span>Add something delicious from today’s menu.</span><button onClick={onBack}>See today’s menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Continue browsing</button><div className="subpage-heading"><span className="store-eyebrow">YOUR SELECTION</span><h1>Your cart</h1><p>Fresh food is prepared after your order is confirmed.</p></div>{lines.length ? <><div className="cart-lines">{lines.map((item) => { const contents = portionContents(item.unit_label); return <article key={item.id}><div>{item.image_url ? <img src={item.image_url} alt="" /> : <ChefHat />}</div><span><b>{item.name}</b><small>{formatMoney(item.price)} / portion{contents ? ` · ${contents} per portion` : ""}</small></span><div className="quantity"><button onClick={() => onQuantity(item.id, item.quantity - 1)} aria-label={`Decrease ${item.name} portions`}><Minus /></button><b>{item.quantity}</b><button onClick={() => onQuantity(item.id, item.quantity + 1)} aria-label={`Increase ${item.name} portions`}><Plus /></button></div><strong>{formatMoney(item.price * item.quantity)}</strong></article>; })}</div><div className="cart-summary"><span><b>Total</b><small>Payment instructions appear after ordering</small></span><strong>{formatMoney(total)}</strong></div><button className="store-primary checkout-button" disabled={!orderingOpen} onClick={onCheckout}>{orderingOpen ? <>Continue to delivery <ChevronRight /></> : "Orders are paused today"}</button></> : <div className="store-empty"><ShoppingBag /><b>Your cart is empty</b><span>Add something delicious from today’s menu.</span><button onClick={onBack}>See today’s menu</button></div>}</section>;
 }
 
 function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>See which meals are still open and which have been delivered.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => { const visibleStage = customerStage(order.stage); return <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${visibleStage}`}><i />{stageLabels[visibleStage]}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>; })}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>See which meals are still open and which have been delivered.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => { const visibleStage = customerStage(order.stage); const isCash = order.payment_method === "cash"; return <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${visibleStage}`}><i />{stageLabels[visibleStage]}</span><span className={`payment-state ${isCash ? "cash" : order.payment_status}`}>{isCash ? <Banknote /> : order.payment_status === "verified" ? <Check /> : <Clock3 />}{isCash ? "Cash on delivery" : order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>; })}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
 }
 
 function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
@@ -641,13 +668,14 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder, alert: OrderAlertResult | null) => void }) {
   const [deliveryTime, setDeliveryTime] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<"upi" | "cash">("upi");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   async function placeOrder(event: React.FormEvent) {
     event.preventDefault(); if (!supabase) return; setBusy(true);
-    const { data, error } = await supabase.rpc("place_customer_order", { p_delivery_time: ceilTimeToQuarter(deliveryTime) || null, p_instructions: instructions, p_items: lines.map((item) => ({ menu_item_id: item.id, quantity: item.quantity })) });
+    const { data, error } = await supabase.rpc("place_customer_order", { p_delivery_time: ceilTimeToQuarter(deliveryTime) || null, p_instructions: instructions, p_items: lines.map((item) => ({ menu_item_id: item.id, quantity: item.quantity })), p_payment_method: paymentMethod });
     if (error) { setBusy(false); return setMessage(error.message); }
-    const { data: order, error: loadError } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,order_details,delivery_time").eq("id", data).single();
+    const { data: order, error: loadError } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,payment_method,order_details,delivery_time").eq("id", data).single();
     if (loadError) { setBusy(false); return setMessage(loadError.message); }
 
     let alert: OrderAlertResult | null = null;
@@ -666,7 +694,7 @@ function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile
     setBusy(false);
     onPlaced(order as CustomerOrder, alert);
   }
-  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div>{profile.standing_instructions && <div className="standing-instruction"><Check /><span><b>Standing instruction applied</b><small>{profile.standing_instructions}</small></span></div>}<label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label><span>Preferred delivery time</span><input type="time" step="900" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} items</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">You’ll receive UPI payment instructions after the order is created.</small></form></div>;
+  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div>{profile.standing_instructions && <div className="standing-instruction"><Check /><span><b>Standing instruction applied</b><small>{profile.standing_instructions}</small></span></div>}<label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label><span>Preferred delivery time</span><input type="time" step="900" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><fieldset className="payment-method-choice"><legend>How would you like to pay?</legend><div><button type="button" className={paymentMethod === "upi" ? "selected" : ""} onClick={() => setPaymentMethod("upi")}><span className="checkout-payment-icon upi">UPI</span><span><b>Pay online</b><small>Google Pay, PhonePe, Paytm or any UPI app</small></span><Check /></button><button type="button" className={paymentMethod === "cash" ? "selected cash" : ""} onClick={() => setPaymentMethod("cash")}><span className="checkout-payment-icon cash"><Banknote /></span><span><b>Cash on delivery</b><small>Pay the delivery person when your food arrives</small></span><Check /></button></div></fieldset><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} portions</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">{paymentMethod === "cash" ? "Cash on delivery selected. Please keep the exact amount ready." : "You’ll be able to choose your UPI app after the order is created."}</small></form></div>;
 }
 
 function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrder; settings: StoreSettings; alert: OrderAlertResult | null; onClose: () => void }) {
@@ -685,6 +713,9 @@ function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrde
     : "";
   const paytmUri = paymentQuery && isAndroid
     ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=net.one97.paytm;end`
+    : "";
+  const phonePeUri = paymentQuery && isAndroid
+    ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.phonepe.app;end`
     : "";
   useEffect(() => {
     let cancelled = false;
@@ -746,17 +777,18 @@ function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrde
         </div>
         {!alert?.automatic && alert?.whatsappUrl && <a className="whatsapp-order-copy" href={alert.whatsappUrl} target="_blank" rel="noreferrer"><MessageCircle /> Send order copy on WhatsApp</a>}
         <div className="payment-total"><span>Amount to pay</span><strong>{formatMoney(Number(order.amount))}</strong></div>
-        {paymentUri ? (
+        {order.payment_method === "cash" ? <div className="cash-on-delivery-confirmation"><span><Banknote /></span><div><b>Cash on delivery selected</b><small>Please pay {formatMoney(Number(order.amount))} to the delivery person when your order arrives.</small></div></div> : paymentUri ? (
           <>
             <div className="upi-panel">
               {qr ? <img src={qr} alt="UPI payment QR" /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}
               <div>
-                <b>Pay with any UPI app</b>
-                <small>{qrKind === "custom" ? "Scan Neeru’s Home Kitchen QR from another screen, or choose your payment app below." : "Scan from another screen, or choose your payment app below."}</small>
+                <div className="upi-trust-heading"><span><ShieldCheck /></span><div><b>Safe UPI payment</b><small>Opens your own payment app. Neeru’s Kitchen never sees your bank details.</small></div></div>
+                <small className="upi-scan-note">{qrKind === "custom" ? "Scan this QR from another screen, or choose your app below." : "Choose your payment app below, or scan this QR from another screen."}</small>
                 <div className="upi-app-actions">
-                  <a className="gpay-action" href={googlePayUri}>Google Pay</a>
-                  {paytmUri && <a className="paytm-action" href={paytmUri}>Paytm</a>}
-                  <a href={paymentUri}>Any UPI app</a>
+                  <a className="upi-app-action gpay-action" href={googlePayUri} aria-label="Pay securely with Google Pay"><span className="payment-app-logo gpay-logo"><i>G</i><b>Pay</b></span><small>Google Pay</small></a>
+                  {phonePeUri && <a className="upi-app-action phonepe-action" href={phonePeUri} aria-label="Pay securely with PhonePe"><span className="payment-app-logo phonepe-logo">पे</span><small>PhonePe</small></a>}
+                  {paytmUri && <a className="upi-app-action paytm-action" href={paytmUri} aria-label="Pay securely with Paytm"><span className="payment-app-logo paytm-logo">paytm</span><small>Paytm</small></a>}
+                  <a className="upi-app-action any-upi-action" href={paymentUri} aria-label="Pay with any installed UPI app"><span className="payment-app-logo any-upi-logo">UPI</span><small>Any UPI app</small></a>
                 </div>
                 <div className="upi-id-row"><code>{settings.upi_id}</code><button type="button" onClick={copyUpiId}>Copy</button></div>
                 {copyMessage && <span className="upi-copy-message">{copyMessage}</span>}
