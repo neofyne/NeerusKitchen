@@ -15,6 +15,7 @@ import {
   Clock3,
   Download,
   FileSpreadsheet,
+  HardDrive,
   IndianRupee,
   KeyRound,
   LayoutDashboard,
@@ -29,6 +30,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  Share2,
   Settings2,
   ShieldCheck,
   Smartphone,
@@ -107,6 +109,10 @@ type ExportOptions = {
   to: string;
   payment: "all" | "paid" | "pending";
 };
+type ExportFormat = "csv" | "xlsx";
+type StorageSection = { count: number; knownBytes: number; unknownSizes: number };
+type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: StorageSection };
+type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
 type AdminStoreSettings = {
   ordering_open: boolean;
   hero_message: string;
@@ -123,6 +129,66 @@ const stages: { key: Stage; label: string; badge: string; short: string; color: 
   { key: "delivered", label: "Delivered", badge: "Delivered", short: "Delivered", color: "green" },
 ];
 const normalizeStage = (value?: string): Stage => value === "delivered" ? "delivered" : "new";
+
+async function compressOrderPhoto(file: File) {
+  const source = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => { URL.revokeObjectURL(url); resolve(image); };
+    image.onerror = () => { URL.revokeObjectURL(url); reject(new Error("This photo format could not be compressed. Please choose a JPG, PNG or WebP image.")); };
+    image.src = url;
+  });
+  const longestSide = 360;
+  const scale = Math.min(1, longestSide / Math.max(source.naturalWidth, source.naturalHeight));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(source.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(source.naturalHeight * scale));
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("This browser could not prepare the order photo.");
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+  let compressed: Blob | null = null;
+  for (const quality of [0.48, 0.38, 0.3, 0.23]) {
+    compressed = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", quality));
+    if (compressed && compressed.size <= 32 * 1024) break;
+  }
+  if (!compressed) throw new Error("This browser could not compress the order photo.");
+  return new File([compressed], `${file.name.replace(/\.[^.]+$/, "") || "order"}.webp`, { type: "image/webp" });
+}
+
+function readableBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function shareOrSaveFile(file: File) {
+  const shareNavigator = navigator as Navigator & { canShare?: (data: ShareData) => boolean };
+  if (shareNavigator.share && (!shareNavigator.canShare || shareNavigator.canShare({ files: [file] }))) {
+    await shareNavigator.share({ files: [file], title: file.name, text: "Neeru's Home Kitchen order data" });
+    return "The phone share sheet was opened. Choose Files, WhatsApp, AirDrop or another app.";
+  }
+  const pickerWindow = window as Window & {
+    showSaveFilePicker?: (options: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<{ createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }> }>;
+  };
+  if (pickerWindow.showSaveFilePicker) {
+    const extension = `.${file.name.split(".").pop()}`;
+    const handle = await pickerWindow.showSaveFilePicker({ suggestedName: file.name, types: [{ description: extension === ".xlsx" ? "Excel workbook" : "CSV file", accept: { [file.type]: [extension] } }] });
+    const writable = await handle.createWritable();
+    await writable.write(file);
+    await writable.close();
+    return `Saved ${file.name}.`;
+  }
+  const url = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = file.name;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return `Downloaded ${file.name}. This browser does not provide a native share sheet.`;
+}
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
 const starterMenu: MenuItem[] = [
@@ -470,7 +536,8 @@ export function AdminApp() {
   async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "payment") {
     if (!session) throw new Error("Please sign in again before uploading a photo.");
     const form = new FormData();
-    form.append("photo", photo);
+    const preparedPhoto = purpose === "orders" ? await compressOrderPhoto(photo) : photo;
+    form.append("photo", preparedPhoto);
     form.append("purpose", purpose);
     const response = await fetch("/api/photos", {
       method: "POST",
@@ -490,7 +557,9 @@ export function AdminApp() {
       return setNotice("Please fill customer name, flat number, and order.");
     }
     let photoPath = values.photo_path;
-    if (photo) {
+    if (values.stage === "delivered") {
+      photoPath = null;
+    } else if (photo) {
       try {
         photoPath = await uploadPhoto(photo, "orders");
       } catch (error) {
@@ -509,6 +578,9 @@ export function AdminApp() {
       : await supabase.from("orders").insert(record);
     if (result.error) setNotice(`Could not save: ${result.error.message}`);
     else {
+      if (editing?.photo_path && photoPath !== editing.photo_path) {
+        await deletePhotoKeys([editing.photo_path]).catch(() => undefined);
+      }
       setAdding(false);
       setEditing(null);
       setScreen("orders");
@@ -518,10 +590,10 @@ export function AdminApp() {
     }
   }
 
-  async function exportOrdersCsv(options: ExportOptions) {
-    if (!supabase) return;
+  async function prepareOrdersExport(options: ExportOptions, format: ExportFormat): Promise<File> {
+    if (!supabase) throw new Error("The shared database is not connected.");
     if (!options.from || !options.to || options.from > options.to) {
-      return setNotice("Choose a valid export date range.");
+      throw new Error("Choose a valid export date range.");
     }
     let query = supabase
       .from("orders")
@@ -532,7 +604,7 @@ export function AdminApp() {
       .order("delivery_time");
     if (options.payment !== "all") query = query.eq("is_paid", options.payment === "paid");
     const { data, error } = await query;
-    if (error) return setNotice(`Could not export orders: ${error.message}`);
+    if (error) throw new Error(`Could not export orders: ${error.message}`);
 
     const safeCell = (value: unknown) => {
       let text = String(value ?? "");
@@ -553,14 +625,75 @@ export function AdminApp() {
       stages.find((stage) => stage.key === order.stage)?.label || order.stage,
       order.remarks,
     ]);
-    const csv = [headers, ...rows].map((row) => row.map(safeCell).join(",")).join("\r\n");
-    const url = URL.createObjectURL(new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `neerus-kitchen-${options.from}-to-${options.to}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-    setNotice(`${rows.length} orders exported. Open the file in Excel or import it into Google Sheets.`);
+    const baseName = `neerus-home-kitchen-${options.from}-to-${options.to}`;
+    if (format === "csv") {
+      const csv = [headers, ...rows].map((row) => row.map(safeCell).join(",")).join("\r\n");
+      return new File(["\ufeff", csv], `${baseName}.csv`, { type: "text/csv;charset=utf-8" });
+    }
+    const { default: writeExcelFile } = await import("write-excel-file/browser");
+    const blob = await writeExcelFile([headers, ...rows], { sheet: "Orders" }).toBlob();
+    return new File([blob], `${baseName}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  }
+
+  async function deletePhotoKeys(keys: string[]) {
+    if (!session || keys.length === 0) return 0;
+    const response = await fetch("/api/photos", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${session.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ keys }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not remove stored photos.");
+    return Number(result.removed || 0);
+  }
+
+  async function loadStorageSummary(): Promise<StorageSummary> {
+    if (!session) throw new Error("Please sign in again to check storage.");
+    const response = await fetch("/api/photos?summary=1", { headers: { Authorization: `Bearer ${session.access_token}` }, cache: "no-store" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not check photo storage.");
+    return result as StorageSummary;
+  }
+
+  async function cleanupData(action: CleanupAction) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    if (action === "all-menu-photos") {
+      const { data, error } = await supabase.from("menu_items").select("id,photo_path").not("photo_path", "is", null);
+      if (error) throw new Error(error.message);
+      const rows = (data ?? []) as Pick<MenuItem, "id" | "photo_path">[];
+      await deletePhotoKeys(rows.flatMap((row) => row.photo_path ? [row.photo_path] : []));
+      if (rows.length) {
+        const update = await supabase.from("menu_items").update({ photo_path: null }).in("id", rows.map((row) => row.id));
+        if (update.error) throw new Error(update.error.message);
+      }
+      await loadMenu();
+      return `${rows.length} uploaded menu photos removed. Recipe names, prices and starter images remain.`;
+    }
+
+    let query = supabase.from("orders").select("id,photo_path,stage");
+    if (action === "delivered-photos" || action === "delivered-orders") query = query.eq("stage", "delivered");
+    if (action === "delivered-photos" || action === "all-order-photos") query = query.not("photo_path", "is", null);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Pick<Order, "id" | "photo_path" | "stage">[];
+    const keys = rows.flatMap((row) => row.photo_path ? [row.photo_path] : []);
+    await deletePhotoKeys(keys);
+
+    if (action === "delivered-orders" || action === "all-orders") {
+      if (rows.length) {
+        const removal = await supabase.from("orders").delete().in("id", rows.map((row) => row.id));
+        if (removal.error) throw new Error(removal.error.message);
+      }
+      await Promise.all([loadOrders(), loadCustomers(), loadActionCenter(false)]);
+      return `${rows.length} ${action === "all-orders" ? "orders" : "delivered orders"} permanently deleted.`;
+    }
+
+    if (rows.length) {
+      const update = await supabase.from("orders").update({ photo_path: null }).in("id", rows.map((row) => row.id));
+      if (update.error) throw new Error(update.error.message);
+    }
+    await loadOrders();
+    return `${keys.length} order photos removed. The order records remain.`;
   }
 
   async function saveMenuItem(values: Pick<MenuItem, "name" | "price" | "description" | "spice_level">, photo?: File, existing?: MenuItem) {
@@ -709,18 +842,32 @@ export function AdminApp() {
 
   async function updateOrder(id: string, changes: Partial<Order>) {
     if (!supabase) return;
+    const currentOrder = orders.find((order) => order.id === id);
     const record = changes.is_paid === undefined
       ? changes
       : { ...changes, payment_status: changes.is_paid ? "verified" : "pending" };
     const { error } = await supabase.from("orders").update(record).eq("id", id);
     if (error) setNotice(`Could not update: ${error.message}`);
-    else loadOrders();
+    else {
+      if (changes.stage === "delivered" && currentOrder?.photo_path) {
+        try {
+          await deletePhotoKeys([currentOrder.photo_path]);
+          await supabase.from("orders").update({ photo_path: null }).eq("id", id);
+          setNotice("Marked delivered. Its temporary order photo was removed automatically.");
+        } catch {
+          setNotice("Marked delivered. Photo cleanup can be retried from Settings → Storage & cleanup.");
+        }
+      }
+      loadOrders();
+    }
   }
   async function deleteOrder(id: string) {
     if (!supabase || !confirm("Delete this order?")) return;
+    const currentOrder = orders.find((order) => order.id === id);
     const { error } = await supabase.from("orders").delete().eq("id", id);
     if (error) setNotice(`Could not delete: ${error.message}`);
     else {
+      if (currentOrder?.photo_path) await deletePhotoKeys([currentOrder.photo_path]).catch(() => undefined);
       setEditing(null);
       loadOrders();
     }
@@ -904,7 +1051,9 @@ export function AdminApp() {
               whatsappNumber={storeSettings.whatsapp_number}
               onLarge={setLarge}
               onDark={setDark}
-              onExport={exportOrdersCsv}
+              onPrepareExport={prepareOrdersExport}
+              onLoadStorage={loadStorageSummary}
+              onCleanup={cleanupData}
               onSavePayment={savePaymentSettings}
               onRemovePaymentQr={removePaymentQr}
               onSaveCustomerContact={saveCustomerContact}
@@ -1208,7 +1357,7 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, accessRequests, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onReviewCustomerAccess, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, accessRequests, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onReviewCustomerAccess, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
@@ -1219,7 +1368,9 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
   whatsappNumber: string;
   onLarge: (large: boolean) => void;
   onDark: (dark: boolean) => void;
-  onExport: (options: ExportOptions) => void;
+  onPrepareExport: (options: ExportOptions, format: ExportFormat) => Promise<File>;
+  onLoadStorage: () => Promise<StorageSummary>;
+  onCleanup: (action: CleanupAction) => Promise<string>;
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
   onRemovePaymentQr: () => Promise<void>;
   onSaveCustomerContact: (whatsappNumber: string) => Promise<void>;
@@ -1248,6 +1399,14 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
   const [reviewingId, setReviewingId] = useState("");
   const [accessMessage, setAccessMessage] = useState("");
   const [accessError, setAccessError] = useState(false);
+  const [exportBusy, setExportBusy] = useState<ExportFormat | "">("");
+  const [preparedFile, setPreparedFile] = useState<File | null>(null);
+  const [exportMessage, setExportMessage] = useState("");
+  const [exportError, setExportError] = useState(false);
+  const [storageSummary, setStorageSummary] = useState<StorageSummary | null>(null);
+  const [storageBusy, setStorageBusy] = useState<CleanupAction | "refresh" | "">("");
+  const [storageMessage, setStorageMessage] = useState("");
+  const [storageError, setStorageError] = useState(false);
   const setExport = <K extends keyof ExportOptions>(key: K, value: ExportOptions[K]) =>
     setExportOptions((current) => ({ ...current, [key]: value }));
 
@@ -1275,6 +1434,10 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
   }, [qrFile]);
 
   useEffect(() => {
+    void refreshStorage();
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     setSavedQrAvailable(false);
     fetch(`/api/photos?key=payment/current&v=${qrRevision}`, { cache: "no-store", signal: controller.signal })
@@ -1285,6 +1448,71 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
 
   const upiLooksValid = /^[a-zA-Z0-9._-]{2,}@[a-zA-Z0-9.-]{2,}$/.test(paymentForm.upi_id.trim());
   const savedQrUrl = `/api/photos?key=payment/current&v=${qrRevision}`;
+
+  async function refreshStorage() {
+    setStorageBusy("refresh");
+    setStorageError(false);
+    try {
+      setStorageSummary(await onLoadStorage());
+    } catch (error) {
+      setStorageError(true);
+      setStorageMessage(error instanceof Error ? error.message : "Could not check photo storage.");
+    } finally {
+      setStorageBusy("");
+    }
+  }
+
+  async function prepareExport(format: ExportFormat) {
+    setExportBusy(format);
+    setExportError(false);
+    setExportMessage("");
+    setPreparedFile(null);
+    try {
+      const file = await onPrepareExport(exportOptions, format);
+      setPreparedFile(file);
+      setExportMessage(`${format === "xlsx" ? "Excel" : "CSV"} file is ready. Tap Share or save to choose Files, WhatsApp, AirDrop or another app.`);
+    } catch (error) {
+      setExportError(true);
+      setExportMessage(error instanceof Error ? error.message : "Could not prepare the export.");
+    } finally {
+      setExportBusy("");
+    }
+  }
+
+  async function sharePrepared() {
+    if (!preparedFile) return;
+    setExportError(false);
+    try {
+      setExportMessage(await shareOrSaveFile(preparedFile));
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setExportError(true);
+      setExportMessage(error instanceof Error ? error.message : "Could not share or save the file.");
+    }
+  }
+
+  async function runCleanup(action: CleanupAction) {
+    const prompts: Record<CleanupAction, string> = {
+      "delivered-photos": "Remove every photo attached to delivered orders? The order records will stay.",
+      "all-order-photos": "Remove ALL order photos? The order records will stay.",
+      "all-menu-photos": "Remove ALL manually uploaded menu photos? Recipe details stay, but uploaded food photos will be cleared.",
+      "delivered-orders": "Permanently delete all delivered order history and its photos? This cannot be undone.",
+      "all-orders": "Permanently delete ALL order history and order photos? This cannot be undone.",
+    };
+    if (!window.confirm(prompts[action])) return;
+    if (action === "all-orders" && window.prompt("Type DELETE ALL ORDERS to confirm") !== "DELETE ALL ORDERS") return;
+    setStorageBusy(action);
+    setStorageError(false);
+    try {
+      setStorageMessage(await onCleanup(action));
+      setStorageSummary(await onLoadStorage());
+    } catch (error) {
+      setStorageError(true);
+      setStorageMessage(error instanceof Error ? error.message : "Cleanup could not be completed.");
+    } finally {
+      setStorageBusy("");
+    }
+  }
 
   async function savePayment(event: FormEvent) {
     event.preventDefault();
@@ -1466,14 +1694,19 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
         </article>
 
         <article className="settings-card export-card">
-          <div className="settings-title"><span className="settings-icon"><FileSpreadsheet /></span><div><h2>Download order data</h2><p>Choose a date range and payment status.</p></div></div>
+          <div className="settings-title"><span className="settings-icon"><FileSpreadsheet /></span><div><h2>Export order data</h2><p>Choose the dates and prepare either a CSV or a real Excel workbook.</p></div></div>
           <div className="export-fields">
             <label><span>From</span><input type="date" value={exportOptions.from} onChange={(event) => setExport("from", event.target.value)} /></label>
             <label><span>To</span><input type="date" value={exportOptions.to} onChange={(event) => setExport("to", event.target.value)} /></label>
             <label className="payment-filter"><span>Payment</span><select value={exportOptions.payment} onChange={(event) => setExport("payment", event.target.value as ExportOptions["payment"])}><option value="all">All orders</option><option value="paid">Paid only</option><option value="pending">Pending only</option></select></label>
           </div>
-          <button className="primary export-button" onClick={() => onExport(exportOptions)}><Download size={19} /> Download CSV</button>
-          <p className="settings-help">CSV opens directly in Excel. In Google Sheets, choose File → Import → Upload. Automatic live Google Sheets syncing can be added later, but it needs a Google account connection.</p>
+          <div className="export-actions">
+            <button className="secondary export-button" disabled={Boolean(exportBusy)} onClick={() => prepareExport("csv")}><Download size={19} /> {exportBusy === "csv" ? "Preparing CSV…" : "Prepare CSV"}</button>
+            <button className="primary export-button" disabled={Boolean(exportBusy)} onClick={() => prepareExport("xlsx")}><FileSpreadsheet size={19} /> {exportBusy === "xlsx" ? "Preparing Excel…" : "Prepare Excel (.xlsx)"}</button>
+          </div>
+          {preparedFile && <div className="prepared-export"><span><b>{preparedFile.name}</b><small>{readableBytes(preparedFile.size)} · ready on this device</small></span><button className="primary" onClick={sharePrepared}><Share2 size={18} /> Share or save</button></div>}
+          {exportMessage && <p className={`settings-message ${exportError ? "error" : "success"}`} role="status">{exportMessage}</p>}
+          <p className="settings-help">On iPhone and Android, Share or save opens the phone’s native sheet for Files, WhatsApp, AirDrop and other apps. On supported Mac browsers it opens Save As; other browsers use Downloads without leaving this page.</p>
         </article>
 
         <article className="settings-card storage-card">
@@ -1481,9 +1714,20 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
           <p className="settings-help">Start typing a returning customer’s name in a new order. Their flat number and usual delivery person will appear automatically.</p>
         </article>
 
-        <article className="settings-card storage-card">
-          <div className="settings-title"><span className="settings-icon"><Camera /></span><div><h2>Photos and recipes</h2><p>Starter photos use Netlify’s CDN; new uploads use private Netlify Blobs.</p></div></div>
-          <p className="settings-help">Use Menu → Add food item whenever you need another recipe. Orders and menu details remain in the shared family database.</p>
+        <article className="settings-card export-card storage-cleanup-card">
+          <div className="settings-title"><span className="settings-icon"><HardDrive /></span><div><h2>Storage &amp; cleanup</h2><p>Order photos are temporary private thumbnails. Menu photos are kept until you remove or replace them.</p></div><button className="storage-refresh" onClick={refreshStorage} disabled={Boolean(storageBusy)}><RotateCcw size={15} /> Refresh</button></div>
+          <div className="storage-summary">
+            <span><Camera /><b>{storageSummary?.orders.count ?? "—"}</b><small>Order photos{storageSummary ? ` · ${readableBytes(storageSummary.orders.knownBytes)} tracked` : ""}</small></span>
+            <span><ChefHat /><b>{storageSummary?.menu.count ?? "—"}</b><small>Uploaded menu photos{storageSummary ? ` · ${readableBytes(storageSummary.menu.knownBytes)} tracked` : ""}</small></span>
+            <span><FileSpreadsheet /><b>Supabase</b><small>Order text, customers and prices</small></span>
+          </div>
+          {storageSummary && (storageSummary.orders.unknownSizes + storageSummary.menu.unknownSizes > 0) && <p className="legacy-storage-note">Some older photos predate size tracking, so the displayed bytes cover new uploads only. The photo counts include everything.</p>}
+          <div className="cleanup-groups">
+            <section><b>Photo cleanup</b><p>Safe: removes image files but keeps order and recipe data.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-photos")}><Trash2 /> Delivered order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-order-photos")}><Trash2 /> All order photos</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-menu-photos")}><Trash2 /> Uploaded menu photos</button></div></section>
+            <section className="danger-cleanup"><b>Database history</b><p>Permanent: deletes order records from Supabase. Export first if you need a backup.</p><div><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("delivered-orders")}><Archive /> Delete delivered history</button><button disabled={Boolean(storageBusy)} onClick={() => runCleanup("all-orders")}><Trash2 /> Delete all orders</button></div></section>
+          </div>
+          {storageMessage && <p className={`settings-message ${storageError ? "error" : "success"}`} role="status">{storageMessage}</p>}
+          <p className="settings-security-note"><ShieldCheck /> Photos live in the private Netlify Blobs store <b>neeru-private-photos</b>. Supabase stores only each photo’s opaque key. New order photos are reduced to a 360 px WebP thumbnail, normally a few tens of KB, and removed automatically when marked delivered.</p>
         </article>
       </section>
       <button className="sign-out-setting" onClick={onSignOut}><CircleUserRound size={19} /> Sign out on this device</button>
@@ -1621,7 +1865,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
           <fieldset className="wide stage-field"><legend>Order stage</legend><div className="stage-choice">{stages.map((s) => <button type="button" className={`${s.color} ${form.stage === s.key ? "selected" : ""}`} key={s.key} onClick={() => set("stage", s.key)}><i />{s.short}</button>)}</div></fieldset>
           <Field label="Remarks / special instructions" value={form.remarks} onChange={(v) => set("remarks", v)} wide textarea />
           <div className="wide quick">{["Less spicy", "No onion", "Extra pickle", "Call before delivery", "Send curd", "No green chilli"].map((t) => <button type="button" key={t} onClick={() => set("remarks", form.remarks ? `${form.remarks}, ${t}` : t)}><Plus size={13} />{t}</button>)}</div>
-          <label className="wide photo-upload"><span><Camera size={18} /> Add a photo to this order <small>Optional</small></span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPhotoPreview(URL.createObjectURL(file)); }} /><div className="photo-drop">{photoPreview ? <img src={photoPreview} alt="Selected order" /> : <><Camera /><b>Take photo or choose from phone</b><small>{form.photo_path ? "A photo is already attached. Choose another to replace it." : "JPG, PNG or phone camera"}</small></>}</div></label>
+          <label className="wide photo-upload"><span><Camera size={18} /> Add a temporary order photo <small>Optional</small></span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPhotoPreview(URL.createObjectURL(file)); }} /><div className="photo-drop">{photoPreview ? <img src={photoPreview} alt="Selected order" /> : <><Camera /><b>Take photo or choose from phone</b><small>{form.photo_path ? "A photo is attached. A replacement will be compressed automatically." : "Compressed to a tiny 360 px thumbnail and deleted after delivery"}</small></>}</div></label>
         </div>
         <div className="modal-actions">{onDelete && <button type="button" className="delete" onClick={onDelete}><Trash2 size={18} /> Delete</button>}<span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check size={19} /> Save order</button></div>
       </form>
