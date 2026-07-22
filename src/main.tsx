@@ -271,6 +271,7 @@ export function AdminApp() {
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("neeru-admin-alert-sound") !== "off");
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [deliveryFilter, setDeliveryFilter] = useState<"all" | DeliveryBy>("all");
   const [view, setView] = useState<"board" | "list">("board");
   const [screen, setScreen] = useState<Screen>("orders");
   const [activeStage, setActiveStage] = useState<Stage>("new");
@@ -517,10 +518,12 @@ export function AdminApp() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return q
-      ? orders.filter((o) => `${o.customer_name} ${o.flat_number} ${o.order_details}`.toLowerCase().includes(q))
-      : orders;
-  }, [orders, search]);
+    return orders.filter((order) => {
+      const matchesDelivery = deliveryFilter === "all" || order.delivered_by === deliveryFilter;
+      const matchesSearch = !q || `${order.customer_name} ${order.flat_number} ${order.order_details}`.toLowerCase().includes(q);
+      return matchesDelivery && matchesSearch;
+    });
+  }, [orders, search, deliveryFilter]);
   const stats = useMemo(
     () => ({
       total: orders.length,
@@ -1020,6 +1023,11 @@ export function AdminApp() {
                   <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search customer, flat or food" />
                   {search && <button onClick={() => setSearch("")} aria-label="Clear search"><X size={17} /></button>}
                 </label>
+                <div className="delivery-filter" role="group" aria-label="Filter orders by delivery person">
+                  <button className={deliveryFilter === "all" ? "active" : ""} aria-pressed={deliveryFilter === "all"} onClick={() => setDeliveryFilter("all")}><List size={15} /><span>All</span><b>{stats.total}</b></button>
+                  <button className={deliveryFilter === "nanny" ? "active" : ""} aria-pressed={deliveryFilter === "nanny"} onClick={() => setDeliveryFilter("nanny")}><CircleUserRound size={15} /><span>Nanny</span><b>{stats.nanny}</b></button>
+                  <button className={deliveryFilter === "others" ? "active" : ""} aria-pressed={deliveryFilter === "others"} onClick={() => setDeliveryFilter("others")}><UtensilsCrossed size={15} /><span>Others</span><b>{stats.others}</b></button>
+                </div>
                 <div className="view-switch" aria-label="Choose order view">
                   <button className={view === "board" ? "active" : ""} onClick={() => setView("board")}><LayoutDashboard size={17} /> Board</button>
                   <button className={view === "list" ? "active" : ""} onClick={() => setView("list")}><List size={17} /> List</button>
@@ -1030,7 +1038,7 @@ export function AdminApp() {
               {loading ? (
                 <div className="empty"><span className="loader" /><strong>Loading orders…</strong></div>
               ) : filtered.length === 0 ? (
-                <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : "Add the first order when the phone rings."}</span>{!search && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
+                <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
                 <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={setEditing} onUpdate={updateOrder} />
               ) : (
