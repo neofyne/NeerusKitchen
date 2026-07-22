@@ -19,6 +19,7 @@ import {
   LayoutDashboard,
   List,
   Mail,
+  MessageCircle,
   Moon,
   Pencil,
   Plus,
@@ -105,6 +106,7 @@ type AdminStoreSettings = {
   upi_id: string;
   merchant_name: string;
   order_cutoff: string;
+  whatsapp_number: string;
 };
 type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
 type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
@@ -200,7 +202,7 @@ export function AdminApp() {
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "" });
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "", whatsapp_number: "" });
 
   useEffect(() => {
     if (!supabase) return;
@@ -260,7 +262,7 @@ export function AdminApp() {
     const [{ data, error }, { data: daily }, { data: configuration }] = await Promise.all([
       supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", today()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
     ]);
     if (error || !data?.length) return;
     const dailyMap = new Map((daily ?? []).map((entry) => [entry.menu_item_id, entry]));
@@ -542,6 +544,19 @@ export function AdminApp() {
     if (!response.ok) throw new Error(result.error || "Could not remove the payment QR code.");
   }
 
+  async function saveCustomerContact(whatsappNumber: string) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const digits = whatsappNumber.replace(/\D/g, "");
+    const normalized = digits.length === 10 ? `91${digits}` : digits;
+    if (normalized && (normalized.length < 11 || normalized.length > 15)) {
+      throw new Error("Enter the WhatsApp number with country code, for example +91 98765 43210.");
+    }
+    const nextSettings = { ...storeSettings, whatsapp_number: normalized };
+    const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...nextSettings, order_cutoff: nextSettings.order_cutoff || null });
+    if (error) throw new Error(`Could not save customer contact: ${error.message}`);
+    setStoreSettings(nextSettings);
+  }
+
   async function updateAdminAccount(values: AdminAccountUpdate) {
     if (!supabase || !session?.user.email) throw new Error("Please sign in again before changing the admin account.");
     const email = values.email.trim().toLowerCase();
@@ -721,11 +736,13 @@ export function AdminApp() {
               customerCount={customers.length}
               adminEmail={session?.user.email || ""}
               paymentSettings={storeSettings}
+              whatsappNumber={storeSettings.whatsapp_number}
               onLarge={setLarge}
               onDark={setDark}
               onExport={exportOrdersCsv}
               onSavePayment={savePaymentSettings}
               onRemovePaymentQr={removePaymentQr}
+              onSaveCustomerContact={saveCustomerContact}
               onUpdateAccount={updateAdminAccount}
               onSignOut={() => supabase?.auth.signOut()}
             />
@@ -965,18 +982,20 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
 function ShoppingBagIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 8h12l1 12H5L6 8Z" /><path d="M9 9V6a3 3 0 0 1 6 0v3" /></svg>; }
 function FlameIcon() { return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22c4 0 7-3 7-7 0-3-2-6-5-9 0 3-2 4-3 5 0-3-1-6-3-8 0 5-3 7-3 12 0 4 3 7 7 7Z" /></svg>; }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onExport, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
   customerCount: number;
   adminEmail: string;
   paymentSettings: AdminStoreSettings;
+  whatsappNumber: string;
   onLarge: (large: boolean) => void;
   onDark: (dark: boolean) => void;
   onExport: (options: ExportOptions) => void;
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
   onRemovePaymentQr: () => Promise<void>;
+  onSaveCustomerContact: (whatsappNumber: string) => Promise<void>;
   onUpdateAccount: (values: AdminAccountUpdate) => Promise<string>;
   onSignOut: () => void;
 }) {
@@ -994,6 +1013,10 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountMessage, setAccountMessage] = useState("");
   const [accountError, setAccountError] = useState(false);
+  const [contactNumber, setContactNumber] = useState(whatsappNumber ? `+${whatsappNumber}` : "");
+  const [contactBusy, setContactBusy] = useState(false);
+  const [contactMessage, setContactMessage] = useState("");
+  const [contactError, setContactError] = useState(false);
   const setExport = <K extends keyof ExportOptions>(key: K, value: ExportOptions[K]) =>
     setExportOptions((current) => ({ ...current, [key]: value }));
 
@@ -1004,6 +1027,10 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   useEffect(() => {
     setAccountForm((current) => ({ ...current, email: adminEmail }));
   }, [adminEmail]);
+
+  useEffect(() => {
+    setContactNumber(whatsappNumber ? `+${whatsappNumber}` : "");
+  }, [whatsappNumber]);
 
   useEffect(() => {
     let objectUrl = "";
@@ -1091,6 +1118,22 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
     }
   }
 
+  async function saveContact(event: FormEvent) {
+    event.preventDefault();
+    setContactBusy(true);
+    setContactMessage("");
+    setContactError(false);
+    try {
+      await onSaveCustomerContact(contactNumber);
+      setContactMessage(contactNumber.trim() ? "WhatsApp contact saved. The customer button is now active." : "WhatsApp contact removed from the customer storefront.");
+    } catch (error) {
+      setContactError(true);
+      setContactMessage(error instanceof Error ? error.message : "Could not save the WhatsApp contact.");
+    } finally {
+      setContactBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="page-heading settings-heading">
@@ -1134,6 +1177,16 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
             <button className="primary settings-save" disabled={paymentBusy || !upiLooksValid}><Save size={17} /> {paymentBusy ? "Saving payment settings…" : "Save payment settings"}</button>
           </form>
           <p className="settings-security-note"><ShieldCheck /> QR files are stored in Netlify Blobs. The UPI ID remains available for tap-to-pay and as an automatic QR fallback.</p>
+        </article>
+
+        <article className="settings-card contact-settings-card">
+          <div className="settings-title"><span className="settings-icon whatsapp-settings-icon"><MessageCircle /></span><div><h2>Customer WhatsApp</h2><p>Give customers a quick way to ask about the menu or their order.</p></div></div>
+          <form className="settings-form" onSubmit={saveContact}>
+            <label><span>WhatsApp number</span><input type="tel" inputMode="tel" value={contactNumber} onChange={(event) => setContactNumber(event.target.value)} placeholder="+91 98765 43210" /></label>
+            <p className="contact-preview"><MessageCircle /><span><b>{contactNumber.trim() ? "Message us on WhatsApp" : "Button hidden until a number is added"}</b><small>The customer link opens a prefilled chat. A 10-digit Indian number automatically receives country code +91.</small></span></p>
+            {contactMessage && <p className={`settings-message ${contactError ? "error" : "success"}`} role="status">{contactMessage}</p>}
+            <button className="primary settings-save" disabled={contactBusy}><Save size={17} /> {contactBusy ? "Saving contact…" : "Save WhatsApp contact"}</button>
+          </form>
         </article>
 
         <article className="settings-card">

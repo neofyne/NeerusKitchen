@@ -311,6 +311,12 @@ img { display: block; max-width: 100%; }
 .settings-save { min-height: 44px; justify-content: center; }
 .settings-security-note { display: flex; align-items: flex-start; gap: 7px; margin: 14px 0 0; padding-top: 13px; border-top: 1px solid #edf0ee; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .settings-security-note svg { width: 14px; height: 14px; flex: 0 0 14px; color: #377d59; }
+.whatsapp-settings-icon { color: #1f754b; background: #e9f7ef; }
+.contact-preview { display: flex; align-items: flex-start; gap: 9px; margin: 0; padding: 11px; border: 1px solid #cfe5d8; border-radius: 10px; color: #226b47; background: #eef8f2; }
+.contact-preview > svg { width: 19px; height: 19px; flex: 0 0 19px; }
+.contact-preview b, .contact-preview small { display: block; }
+.contact-preview b { font-size: 11px; }
+.contact-preview small { margin-top: 4px; color: #64756b; font-size: 9px; line-height: 1.45; }
 .payment-settings-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
 .qr-uploader { display: grid; grid-template-columns: 104px minmax(0, 1fr); align-items: center; gap: 14px; padding: 12px; border: 1px solid #dce4df; border-radius: 12px; background: #f8faf8; }
 .qr-preview-box { width: 104px; height: 104px; display: grid; place-items: center; overflow: hidden; padding: 5px; border: 1px solid #dce3df; border-radius: 11px; background: #fff; }
@@ -711,6 +717,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dark .remove-food { color: #aab5ae; }
 .dark .remove-food:hover { color: #ff9d89; background: #38221d; }
 .dark .settings-icon { color: #ffab8c; background: #382118; }
+.dark .whatsapp-settings-icon { color: #8ed9ad; background: #173021; }
+.dark .contact-preview { color: #8ed9ad; border-color: #38674d; background: #173021; }
+.dark .contact-preview small { color: #aab5ae; }
 .dark .settings-form label > span { color: #c7d0ca; }
 .dark .settings-form input { color: var(--ink); border-color: #3a453e; background: #121914; -webkit-text-fill-color: var(--ink); }
 .dark .settings-form input:focus { border-color: #5d8b70; box-shadow: 0 0 0 3px #20372a; }

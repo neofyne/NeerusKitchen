@@ -11,6 +11,7 @@ import {
   Flame,
   Home,
   LogOut,
+  MessageCircle,
   Minus,
   Plus,
   ReceiptText,
@@ -66,6 +67,7 @@ type StoreSettings = {
   upi_id: string;
   merchant_name: string;
   order_cutoff: string | null;
+  whatsapp_number: string;
 };
 
 const starterImages: Record<string, string> = {
@@ -108,6 +110,7 @@ const defaultSettings: StoreSettings = {
   upi_id: "krsnasolo@okicici",
   merchant_name: "Neeru's Kitchen",
   order_cutoff: null,
+  whatsapp_number: "",
 };
 
 const localToday = () => {
@@ -174,7 +177,7 @@ export function Storefront() {
     const [{ data: menu }, { data: daily }, { data: configuration }] = await Promise.all([
       supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path").eq("is_active", true).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price").eq("menu_date", localToday()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number").eq("id", 1).maybeSingle(),
     ]);
     const dailyMap = new Map((daily || []).map((entry) => [entry.menu_item_id, entry]));
     if (!menu) {
@@ -222,6 +225,10 @@ export function Storefront() {
   const cartLines = items.filter((item) => cart[item.id]).map((item) => ({ ...item, quantity: cart[item.id] }));
   const cartCount = cartLines.reduce((total, item) => total + item.quantity, 0);
   const cartTotal = cartLines.reduce((total, item) => total + item.price * item.quantity, 0);
+  const whatsappNumber = settings.whatsapp_number?.replace(/\D/g, "") || "";
+  const whatsappHref = whatsappNumber
+    ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hi Neeru's Kitchen, I have a question about today's menu or my order.")}`
+    : "";
 
   function setQuantity(id: string, quantity: number) {
     setCart((current) => {
@@ -295,6 +302,7 @@ export function Storefront() {
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
+      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp +${whatsappNumber}`}><MessageCircle /><span><b>Need help?</b><small>Message us on WhatsApp</small></span></a>}
       </div>
     </div>
   );
