@@ -231,8 +231,39 @@ async function shareOrSaveFile(file: File) {
   return `Downloaded ${file.name}. This browser does not provide a native share sheet.`;
 }
 
+function promotionShareText(prepared: PreparedPromotion) {
+  const url = prepared.url.trim();
+  const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const body = prepared.text
+    .replace(new RegExp(`(?:\\s*Order here:\\s*)?${escapedUrl}`, "gi"), "")
+    .trim();
+  return `${body}\n\n🛒 *Order now*\n${url}`;
+}
+
+async function refreshIfAdminBuildIsStale() {
+  if (import.meta.env.DEV) return false;
+  const currentAsset = Array.from(document.scripts)
+    .map((script) => script.src ? new URL(script.src, window.location.origin).pathname : "")
+    .find((path) => /^\/assets\/main-[^/]+\.js$/.test(path));
+  if (!currentAsset) return false;
+  try {
+    const response = await fetch(`/admin?share-check=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } });
+    if (!response.ok) return false;
+    const html = await response.text();
+    const latestAsset = html.match(/src="(\/assets\/main-[^"]+\.js)"/)?.[1];
+    if (!latestAsset || latestAsset === currentAsset) return false;
+    window.location.replace(`/admin?updated=${Date.now()}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function sharePromotion(prepared: PreparedPromotion) {
-  const shareText = `${prepared.text}\n\n🛒 *Order now*\n${prepared.url}`;
+  if (await refreshIfAdminBuildIsStale()) throw new Error("The app was updated before sharing. Please tap Share now again after it reloads.");
+  const shareText = promotionShareText(prepared);
+  // Keep the ordering URL only inside `text`. Passing it again as ShareData.url
+  // makes WhatsApp append the same link a second time on some phones.
   const data: ShareData = { title: prepared.title, text: shareText };
   if (prepared.image) data.files = [prepared.image];
   const shareNavigator = navigator as Navigator & { canShare?: (value: ShareData) => boolean };
