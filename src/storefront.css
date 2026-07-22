@@ -41,8 +41,9 @@
 .store-brand strong { font-size: 19px; font-weight: 880; line-height: 1.1; letter-spacing: -.04em; }
 .store-brand small { margin-top: 4px; color: #7c857f; font-size: 7.5px; font-weight: 850; letter-spacing: .11em; }
 .store-header-actions { display: flex; align-items: center; gap: 8px; }
-.store-contact-link { min-height: 38px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid #cfe5d8; border-radius: 11px; color: #187046; background: #eef8f2; font-size: 10px; font-weight: 820; text-decoration: none; }
-.store-contact-link svg { width: 17px; height: 17px; }
+.store-contact-link { min-height: 40px; display: inline-flex; align-items: center; gap: 7px; padding: 0 12px; border: 1px solid #168447; border-radius: 11px; color: #fff; background: linear-gradient(145deg, #28a963, #1d8f50); box-shadow: 0 7px 18px rgba(29,143,80,.22); font-size: 10px; font-weight: 850; text-decoration: none; transition: transform .18s ease, box-shadow .18s ease; }
+.store-contact-link:hover { transform: translateY(-1px); box-shadow: 0 10px 22px rgba(29,143,80,.28); }
+.store-contact-link svg { width: 19px; height: 19px; stroke-width: 2.35; }
 .family-link { color: #6d776f; font-size: 12px; font-weight: 750; text-decoration: none; }
 .header-cart-button { min-height: 43px; display: flex; align-items: center; gap: 10px; padding: 0 12px; border: 1px solid #dfe2dd; border-radius: 13px; color: var(--store-green-dark); background: #fff; }
 .header-cart-button.active { border-color: #bcd6c8; background: #f1f8f4; }
@@ -267,7 +268,8 @@
   .store-brand small { font-size: 6.2px; letter-spacing: .08em; }
   .family-link { display: none; }
   .store-header-actions { gap: 6px; }
-  .store-contact-link { width: 40px; min-height: 40px; justify-content: center; padding: 0; border-radius: 12px; }
+  .store-contact-link { width: 42px; min-height: 42px; justify-content: center; padding: 0; border-radius: 13px; box-shadow: 0 7px 18px rgba(29,143,80,.3), inset 0 0 0 1px rgba(255,255,255,.16); }
+  .store-contact-link svg { width: 21px; height: 21px; }
   .store-contact-link span { display: none; }
   .header-cart-button { width: 40px; min-height: 40px; justify-content: center; padding: 0; border-radius: 12px; }
   .header-cart-copy { display: none; }
@@ -304,9 +306,9 @@
   .quantity { min-height: 34px; grid-template-columns: 27px 21px 27px; }
   .featured-badge, .soldout-badge { top: 8px; left: 8px; padding: 6px 7px; font-size: 8px; }
   .store-bottom-nav { position: fixed; z-index: 40; right: 0; bottom: 0; left: 0; height: calc(70px + env(safe-area-inset-bottom)); display: grid; grid-template-columns: repeat(3, 1fr); padding: 7px 14px env(safe-area-inset-bottom); border-top: 1px solid #dfe1da; background: rgba(251,250,247,.97); backdrop-filter: blur(16px); box-shadow: 0 -8px 30px rgba(23,33,27,.07); }
-  .store-whatsapp { right: 13px; bottom: calc(82px + env(safe-area-inset-bottom)); min-height: 46px; padding: 6px 10px 6px 7px; border-radius: 14px; }
+  .store-whatsapp { right: 13px; bottom: calc(82px + env(safe-area-inset-bottom)); min-height: 49px; padding: 6px 12px 6px 7px; border-radius: 15px; box-shadow: 0 12px 30px rgba(19,106,58,.34), inset 0 0 0 1px rgba(255,255,255,.14); }
   .store-whatsapp > svg { width: 29px; height: 29px; flex-basis: 29px; }
-  .store-whatsapp b { font-size: 10px; }
+  .store-whatsapp b { font-size: 11px; }
   .store-whatsapp small { display: none; }
   .store-bottom-nav button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: #7c867f; font-size: 9px; font-weight: 800; }
   .store-bottom-nav button.active { color: var(--store-orange); }

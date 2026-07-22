@@ -220,7 +220,7 @@ export function AdminApp() {
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "", whatsapp_number: "" });
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "", whatsapp_number: "918483000013" });
 
   useEffect(() => {
     if (!supabase) return;

@@ -111,7 +111,7 @@ const defaultSettings: StoreSettings = {
   upi_id: "krsnasolo@okicici",
   merchant_name: "Neeru's Kitchen",
   order_cutoff: null,
-  whatsapp_number: "",
+  whatsapp_number: "918483000013",
 };
 
 const localToday = () => {
@@ -278,7 +278,7 @@ export function Storefront() {
       <header className="store-header">
         <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
         <div className="store-header-actions">
-          {whatsappHref && <a className="store-contact-link" href={whatsappHref} target="_blank" rel="noreferrer" aria-label={`Contact Neeru's Kitchen on WhatsApp ${whatsappDisplay}`}><MessageCircle /><span>Contact</span></a>}
+          {whatsappHref && <a className="store-contact-link" href={whatsappHref} target="_blank" rel="noreferrer" aria-label={`Contact Neeru's Kitchen on WhatsApp ${whatsappDisplay}`}><MessageCircle /><span>WhatsApp</span></a>}
           <a className="family-link" href="/admin">Family desk</a>
           <button className={`header-cart-button ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")} aria-label={cartCount ? `Cart, ${cartCount} items, ${formatMoney(cartTotal)}` : "Cart, empty"}>
             <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
@@ -320,7 +320,7 @@ export function Storefront() {
       {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
-      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>Need help?</b><small>{whatsappDisplay}</small></span></a>}
+      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>WhatsApp us</b><small>{whatsappDisplay}</small></span></a>}
       </div>
     </div>
   );
