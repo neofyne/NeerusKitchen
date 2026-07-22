@@ -10,6 +10,7 @@ const starterImages: Record<string, string> = {
   "Veg pulao": "/food/veg-pulao.jpg",
   "Curd rice": "/food/curd-rice.jpg",
   "Aloo paratha": "/food/aloo-paratha.jpg",
+  "Aloo Parantha": "/food/aloo-paratha.jpg",
   Poha: "/food/poha.jpg",
 };
 
