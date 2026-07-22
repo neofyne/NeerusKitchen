@@ -12,6 +12,15 @@ func writePNG(_ image: NSImage, name: String) throws {
   try png.write(to: outputDirectory.appendingPathComponent(name))
 }
 
+func writeJPEG(_ image: NSImage, name: String, quality: CGFloat = 0.82) throws {
+  guard let data = image.tiffRepresentation,
+        let bitmap = NSBitmapImageRep(data: data),
+        let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality]) else {
+    throw NSError(domain: "NeerusKitchenAssets", code: 2)
+  }
+  try jpeg.write(to: outputDirectory.appendingPathComponent(name))
+}
+
 func drawLogo(in rect: NSRect) {
   NSColor(calibratedRed: 0.93, green: 0.32, blue: 0.13, alpha: 1).setFill()
   NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.24, yRadius: rect.width * 0.24).fill()
@@ -88,6 +97,38 @@ drawText("Order today’s freshly prepared vegetarian meals.", at: NSPoint(x: 72
 drawText("neerus-kitchen.netlify.app", at: NSPoint(x: 72, y: 77), font: .systemFont(ofSize: 19, weight: .bold), color: ink)
 card.unlockFocus()
 try writePNG(card, name: "neerus-kitchen-share.png")
+
+// WhatsApp often renders a compact square thumbnail. Keep the logo and food
+// recognizable even when the image is reduced to roughly 80 × 80 pixels.
+let whatsappCard = NSImage(size: NSSize(width: 600, height: 600))
+whatsappCard.lockFocus()
+NSColor(calibratedRed: 0.985, green: 0.975, blue: 0.945, alpha: 1).setFill()
+NSRect(x: 0, y: 0, width: 600, height: 600).fill()
+
+drawLogo(in: NSRect(x: 38, y: 476, width: 88, height: 88))
+drawText("Neeru’s Kitchen", at: NSPoint(x: 150, y: 518), font: .systemFont(ofSize: 32, weight: .heavy), color: ink)
+drawText("100% VEGETARIAN · HOME-COOKED", at: NSPoint(x: 152, y: 487), font: .systemFont(ofSize: 11, weight: .bold), color: muted, tracking: 0.9)
+drawText("Fresh food.", at: NSPoint(x: 40, y: 355), font: .systemFont(ofSize: 48, weight: .heavy), color: ink)
+drawText("Feels like home.", at: NSPoint(x: 40, y: 297), font: .systemFont(ofSize: 48, weight: .heavy), color: orange)
+drawText("ORDER TODAY", at: NSPoint(x: 42, y: 91), font: .systemFont(ofSize: 15, weight: .bold), color: orange, tracking: 1.3)
+drawText("neerus-kitchen.netlify.app", at: NSPoint(x: 42, y: 58), font: .systemFont(ofSize: 16, weight: .bold), color: ink)
+
+if let photo = NSImage(contentsOf: photoURL) {
+  let photoFrame = NSRect(x: 350, y: 34, width: 210, height: 210)
+  NSGraphicsContext.saveGraphicsState()
+  NSBezierPath(ovalIn: photoFrame).addClip()
+  let side = min(photo.size.width, photo.size.height)
+  let source = NSRect(x: (photo.size.width - side) / 2, y: (photo.size.height - side) / 2, width: side, height: side)
+  photo.draw(in: photoFrame, from: source, operation: .sourceOver, fraction: 1)
+  NSGraphicsContext.restoreGraphicsState()
+  NSColor.white.setStroke()
+  let photoBorder = NSBezierPath(ovalIn: photoFrame.insetBy(dx: -6, dy: -6))
+  photoBorder.lineWidth = 12
+  photoBorder.stroke()
+}
+
+whatsappCard.unlockFocus()
+try writeJPEG(whatsappCard, name: "neerus-kitchen-whatsapp-v4.jpg", quality: 0.80)
 
 for size in [180, 192, 512] {
   let icon = NSImage(size: NSSize(width: size, height: size))
