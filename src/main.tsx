@@ -170,6 +170,14 @@ const emptyDraft = (date: string): Draft => ({
 });
 const money = (amount: number) =>
   `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(amount)}`;
+type BuildingWing = "" | "A" | "B" | "C" | "D";
+const splitAdminFlat = (value = "") => {
+  const normalized = value.trim().toUpperCase();
+  const match = normalized.match(/^([A-D])[-\s]?(\d+)$/);
+  return match
+    ? { wing: match[1] as BuildingWing, number: match[2] }
+    : { wing: "" as BuildingWing, number: normalized.replace(/\D/g, "") };
+};
 const dateLabel = (date: string) =>
   new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "short" }).format(
     new Date(`${date}T00:00:00`),
@@ -1373,30 +1381,59 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   const [form, setForm] = useState<Draft>({ ...draft, order_details: prefillItem?.name || draft.order_details, amount: prefillItem?.price || draft.amount });
   const [photo, setPhoto] = useState<File>();
   const [photoPreview, setPhotoPreview] = useState<string>();
+  const initialFlat = splitAdminFlat(draft.flat_number);
+  const [flatWing, setFlatWing] = useState<BuildingWing>(initialFlat.wing);
+  const [flatDigits, setFlatDigits] = useState(initialFlat.number);
+  const [flatWarning, setFlatWarning] = useState("");
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setForm((v) => ({ ...v, [key]: value }));
+  const setCustomerFlat = (flatNumber: string) => {
+    const parsed = splitAdminFlat(flatNumber);
+    setFlatWing(parsed.wing);
+    setFlatDigits(parsed.number);
+    setFlatWarning("");
+  };
+  const updateFlatNumber = (value: string) => {
+    const digits = value.replace(/\D/g, "").slice(0, 5);
+    setFlatDigits(digits);
+    setFlatWarning(/\D/.test(value) ? "Use numbers only for the flat number." : "");
+    set("flat_number", flatWing && digits ? `${flatWing}-${digits}` : "");
+  };
+  const updateFlatWing = (wing: BuildingWing) => {
+    setFlatWing(wing);
+    setFlatWarning("");
+    set("flat_number", wing && flatDigits ? `${wing}-${flatDigits}` : "");
+  };
   const updateCustomerName = (name: string) => {
     const match = customers.find((profile) => profile.customer_name.toLowerCase() === name.trim().toLowerCase());
+    if (match) setCustomerFlat(match.flat_number);
     setForm((current) => match
       ? { ...current, customer_name: name, flat_number: match.flat_number, delivered_by: match.delivered_by }
       : { ...current, customer_name: name });
   };
-  const selectCustomer = (profile: CustomerProfile) => setForm((current) => ({
-    ...current,
-    customer_name: profile.customer_name,
-    flat_number: profile.flat_number,
-    delivered_by: profile.delivered_by,
-  }));
+  const selectCustomer = (profile: CustomerProfile) => {
+    setCustomerFlat(profile.flat_number);
+    setForm((current) => ({
+      ...current,
+      customer_name: profile.customer_name,
+      flat_number: profile.flat_number,
+      delivered_by: profile.delivered_by,
+    }));
+  };
   const selectFood = (item: MenuItem) => {
     set("order_details", form.order_details ? `${form.order_details}, ${item.name}` : item.name);
     if (!form.amount && item.price) set("amount", item.price);
   };
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); onSave(form, photo); }}>
+      <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if (!flatWing || !flatDigits) { setFlatWarning(!flatWing ? "Choose the building wing." : "Enter the flat number."); return; } onSave({ ...form, flat_number: `${flatWing}-${flatDigits}` }, photo); }}>
         <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{"id" in draft ? "Edit order" : "New order"}</h2><p>Customer, food and delivery details</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
         <div className="form-grid">
           <CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
-          <Field label="Flat number" value={form.flat_number} onChange={(v) => set("flat_number", v)} />
+          <div className={`admin-flat-fields ${flatWarning ? "has-warning" : ""}`}>
+            <label><span>Wing</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Wing {wing}</option>)}</select></label>
+            <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
+            {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
+          </div>
           <div className="wide food-picker"><label>Choose food</label><div className="food-options">{menuItems.map((item) => <button type="button" key={item.id} className={form.order_details.toLowerCase().includes(item.name.toLowerCase()) ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? money(item.price) : ""}</small></button>)}</div></div>
           <Field label="Order details" value={form.order_details} onChange={(v) => set("order_details", v)} wide />
           <TimeField value={form.delivery_time || ""} onChange={(v) => set("delivery_time", v)} />
