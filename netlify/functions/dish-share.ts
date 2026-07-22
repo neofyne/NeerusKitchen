@@ -36,6 +36,11 @@ const dishSlug = (value: string) => value
 const safeDecode = (value: string) => {
   try { return decodeURIComponent(value); } catch { return ""; }
 };
+const formatTime12 = (value: string) => {
+  const [hourValue, minuteValue] = value.slice(0, 5).split(":").map(Number);
+  if (!Number.isInteger(hourValue) || !Number.isInteger(minuteValue)) return value.slice(0, 5);
+  return `${hourValue % 12 || 12}:${String(minuteValue).padStart(2, "0")} ${hourValue >= 12 ? "PM" : "AM"}`;
+};
 
 const indiaDate = () => {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
@@ -67,7 +72,7 @@ export default async (request: Request) => {
   const daily = dailyRows[0];
   const price = Number(daily?.special_price ?? item.price ?? 0);
   const limited = daily?.portions_available === null || daily?.portions_available === undefined ? "" : ` Only ${daily.portions_available} portions available.`;
-  const until = daily?.promotion_until ? ` Order before ${daily.promotion_until.slice(0, 5)}.` : "";
+  const until = daily?.promotion_until ? ` Order before ${formatTime12(daily.promotion_until)}.` : "";
   const description = `${daily?.promotion_message || item.description || "Fresh home-style vegetarian food, prepared with care."}${limited}${until}`.trim();
   const imagePath = item.photo_path ? `/api/photos?key=${encodeURIComponent(item.photo_path)}` : starterImages[item.name] || "/neerus-home-kitchen-whatsapp-v5.jpg";
   const imageUrl = new URL(imagePath, origin).toString();

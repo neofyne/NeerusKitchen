@@ -550,6 +550,9 @@ img { display: block; max-width: 100%; }
 .promotion-form input, .promotion-form textarea { width: 100%; min-height: 45px; padding: 10px 11px; border: 1px solid #d9e0dc; border-radius: 10px; color: var(--ink); background: #fff; font: inherit; }
 .promotion-form textarea { min-height: 92px; resize: vertical; }
 .promotion-form .wide { grid-column: 1 / -1; }
+.promotion-form .time-field { min-width: 0; }
+.promotion-form .time-field > span small, .time-field > span small { color: var(--muted); font-size: 9px; }
+.category-promotion-form { margin-top: 14px; }
 .share-category-choice { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: start; gap: 10px; margin-top: 14px; padding: 13px; border: 1px solid #cfded5; border-radius: 11px; color: #244f39; background: #f2f8f4; cursor: pointer; }
 .share-category-choice input { width: 19px; height: 19px; margin: 1px 0 0; accent-color: #247550; }
 .share-category-choice span { min-width: 0; }
@@ -602,11 +605,14 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .time-panel { margin-top: 8px; padding: 12px; border: 1px solid #d9e0dc; border-radius: 12px; background: #f8faf9; box-shadow: 0 10px 28px rgba(23, 33, 27, .09); }
 .time-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
 .time-panel-head b { font-size: 13px; }
+.time-panel-head > div { display: flex; align-items: center; gap: 5px; }
 .time-panel-head button { min-height: 32px; padding: 0 11px; border-radius: 8px; color: var(--brand-dark); background: var(--brand-soft); font-size: 12px; font-weight: 850; }
+.time-panel-head button.time-clear { color: #6c7770; background: #edf1ee; }
 .time-section + .time-section { margin-top: 11px; }
 .time-section > span { display: block; margin-bottom: 6px; color: #748078; font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
 .time-grid { display: grid; gap: 5px; }
-.time-grid.hours, .time-grid.minutes { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.time-grid.hours { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.time-grid.minutes { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .time-grid.period { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .time-grid button { min-width: 0; min-height: 34px; border: 1px solid #dce3de; border-radius: 8px; color: #536058; background: #fff; font-size: 11px; font-weight: 800; }
 .time-grid button.selected { border-color: var(--brand); color: #fff; background: var(--brand); box-shadow: 0 4px 10px rgba(233, 91, 42, .2); }
@@ -944,6 +950,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .promotion-preview > img, .promotion-preview > span { width: 82px; height: 74px; }
   .promotion-form { grid-template-columns: 1fr 1fr; gap: 10px; }
   .promotion-form .wide { grid-column: 1 / -1; }
+  .promotion-form > .time-field, .promotion-form > .delivery-date-field { grid-column: 1 / -1; }
   .modal-head { top: 0; margin: -3px -1px 18px; padding: 7px 1px 16px; }
   .modal-head h2 { font-size: 23px; }
   .modal-head p { max-width: 235px; font-size: 12px; line-height: 1.45; }

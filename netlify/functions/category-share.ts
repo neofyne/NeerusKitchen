@@ -19,6 +19,11 @@ const escapeHtml = (value: unknown) => String(value ?? "")
 const slugify = (value: string) => value.toLowerCase().normalize("NFKD")
   .replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const safeDecode = (value: string) => { try { return decodeURIComponent(value); } catch { return ""; } };
+const formatTime12 = (value: string) => {
+  const [hourValue, minuteValue] = value.slice(0, 5).split(":").map(Number);
+  if (!Number.isInteger(hourValue) || !Number.isInteger(minuteValue)) return value.slice(0, 5);
+  return `${hourValue % 12 || 12}:${String(minuteValue).padStart(2, "0")} ${hourValue >= 12 ? "PM" : "AM"}`;
+};
 const indiaDate = () => {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
@@ -45,13 +50,14 @@ export default async (request: Request) => {
   const items = await menuResponse.json() as Array<{ id: string; name: string; price: number; description: string; photo_path: string | null; unit_label: string }>;
   const hero = items.find((item) => slugify(item.name) === heroSlug) || items[0];
   if (!hero) return Response.redirect(origin, 302);
-  const dailyResponse = await fetch(`${supabaseUrl}/rest/v1/daily_menu?menu_item_id=eq.${encodeURIComponent(hero.id)}&menu_date=eq.${indiaDate()}&select=special_price,promotion_message&limit=1`, { headers });
-  const daily = dailyResponse.ok ? (await dailyResponse.json() as Array<{ special_price: number | null; promotion_message: string }>)[0] : undefined;
+  const dailyResponse = await fetch(`${supabaseUrl}/rest/v1/daily_menu?menu_item_id=eq.${encodeURIComponent(hero.id)}&menu_date=eq.${indiaDate()}&select=special_price,promotion_message,promotion_until&limit=1`, { headers });
+  const daily = dailyResponse.ok ? (await dailyResponse.json() as Array<{ special_price: number | null; promotion_message: string; promotion_until: string | null }>)[0] : undefined;
   const price = Number(daily?.special_price ?? hero.price ?? 0);
   const imagePath = hero.photo_path ? `/api/photos?key=${encodeURIComponent(hero.photo_path)}` : starterImages[hero.name] || "/neerus-home-kitchen-whatsapp-v5.jpg";
   const imageUrl = new URL(imagePath, origin).toString();
   const title = `${category.name} Menu · ${hero.name} featured`;
-  const description = `${daily?.promotion_message || category.description || "Fresh home-style vegetarian dishes, made after you order."} ${items.length} dishes available from ₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.min(...items.map((item) => Number(item.price))))}.`;
+  const cutoff = daily?.promotion_until ? ` Order before ${formatTime12(daily.promotion_until)}.` : "";
+  const description = `${daily?.promotion_message || category.description || "Fresh home-style vegetarian dishes, made after you order."} ${items.length} dishes available from ₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(Math.min(...items.map((item) => Number(item.price))))}.${cutoff}`;
   const orderUrl = `${origin}/?category=${encodeURIComponent(category.slug)}&hero=${encodeURIComponent(heroSlug)}`;
   return new Response(`<!doctype html><html lang="en"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

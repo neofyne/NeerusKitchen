@@ -54,6 +54,7 @@ import "./styles.css";
 import "./storefront.css";
 import { Storefront } from "./storefront";
 import { supabase } from "./supabase";
+import { ceilTimeToQuarter, composePromotionShareText, formatTime12, promotionTimingLines, quarterHourMinutes } from "./promotionFormat";
 
 type Stage = "new" | "delivered";
 type DeliveryBy = "nanny" | "others";
@@ -142,8 +143,8 @@ type StorageSection = { count: number; knownBytes: number; unknownSizes: number 
 type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: StorageSection };
 type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
 type OrderDeletionReason = "cancelled" | "unpaid" | "duplicate" | "mistake" | "unavailable" | "other";
-type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string; includeCategory: boolean };
-type CategoryPromotionValues = { heroId: string; message: string };
+type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string; deliveryDate: string; deliveryTime: string; includeCategory: boolean };
+type CategoryPromotionValues = { heroId: string; message: string; until: string; deliveryDate: string; deliveryTime: string };
 type PreparedPromotion = { title: string; text: string; url: string; image?: File };
 type AdminStoreSettings = {
   ordering_open: boolean;
@@ -288,12 +289,7 @@ async function shareOrSaveFile(file: File) {
 }
 
 function promotionShareText(prepared: PreparedPromotion) {
-  const url = prepared.url.trim();
-  const escapedUrl = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const body = prepared.text
-    .replace(new RegExp(`(?:\\s*Order here:\\s*)?${escapedUrl}`, "gi"), "")
-    .trim();
-  return `${body}\n\n🛒 *Order now*\n${url}`;
+  return composePromotionShareText(prepared.text, prepared.url);
 }
 
 async function refreshIfAdminBuildIsStale() {
@@ -1130,6 +1126,8 @@ export function AdminApp() {
 
   async function prepareDishPromotion(item: MenuItem, values: PromotionValues): Promise<PreparedPromotion> {
     if (!supabase) throw new Error("The shared database is not connected.");
+    const cutoffTime = ceilTimeToQuarter(values.until);
+    const deliveryTime = ceilTimeToQuarter(values.deliveryTime);
     const sharedCategory = values.includeCategory
       ? dishCategories.find((category) => category.id === item.category_id && category.is_active)
       : undefined;
@@ -1144,7 +1142,7 @@ export function AdminApp() {
       portions_available: values.portions,
       special_price: values.specialPrice,
       promotion_message: values.message.trim(),
-      promotion_until: values.until || null,
+      promotion_until: cutoffTime || null,
     };
     const dailyRows = sharedCategory && categoryItems.length > 1
       ? categoryItems.map((candidate) => candidate.id === item.id ? daily : {
@@ -1161,10 +1159,20 @@ export function AdminApp() {
     const { error } = await supabase.from("daily_menu").upsert(dailyRows, { onConflict: "menu_item_id,menu_date" });
     if (error) throw new Error(`Could not save today’s promotion: ${error.message}`);
     const price = Number(values.specialPrice ?? item.price);
-    const lines = [`🍲 *${item.name}*`, values.message.trim() || item.description || "Freshly prepared at Neeru’s Home Kitchen.", `Today: ${money(price)}`];
+    const lines = [
+      "❤️ *Neeru’s Home Kitchen*",
+      "",
+      `🍲 *${item.name}*`,
+      "",
+      values.message.trim() || item.description || "Freshly prepared at Neeru’s Home Kitchen.",
+      "",
+      `💰 *Today: ${money(price)}${item.unit_label && item.unit_label !== "portion" ? ` / ${item.unit_label}` : ""}*`,
+    ];
     if (values.specialPrice !== null && Number(values.specialPrice) < Number(item.price)) lines.push(`Regular price: ${money(item.price)}`);
     if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
-    if (values.until) lines.push(`Order before ${values.until}`);
+    const timingLines = promotionTimingLines(values.deliveryDate, deliveryTime, cutoffTime);
+    if (timingLines.length) lines.push("", ...timingLines);
+    lines.push("", "Made fresh after you order, so every portion is prepared just for you.");
     const dishSlug = item.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     const url = sharedCategory && categoryItems.length > 1
       ? `${window.location.origin}/c/${encodeURIComponent(sharedCategory.slug)}/${encodeURIComponent(dishSlug || item.id.slice(0, 8))}`
@@ -1183,11 +1191,13 @@ export function AdminApp() {
       }
     }
     await loadMenu();
-    return { title: `${item.name} from Neeru’s Home Kitchen`, text: lines.join("\n"), url, image: imageFile };
+    return { title: `${item.name} from Neeru’s Home Kitchen`, text: lines.join("\n").replace(/\n{3,}/g, "\n\n"), url, image: imageFile };
   }
 
   async function prepareCategoryPromotion(category: DishCategory, values: CategoryPromotionValues): Promise<PreparedPromotion> {
     if (!supabase) throw new Error("The shared database is not connected.");
+    const cutoffTime = ceilTimeToQuarter(values.until);
+    const deliveryTime = ceilTimeToQuarter(values.deliveryTime);
     const categoryItems = menuItems.filter((item) => item.is_active && item.category_id === category.id);
     const hero = categoryItems.find((item) => item.id === values.heroId);
     if (!hero) throw new Error("Choose a featured dish from this category.");
@@ -1199,14 +1209,15 @@ export function AdminApp() {
       portions_available: item.daily?.portions_available ?? null,
       special_price: item.daily?.special_price ?? null,
       promotion_message: item.id === hero.id ? values.message.trim() : item.daily?.promotion_message || "",
-      promotion_until: item.daily?.promotion_until || null,
+      promotion_until: item.id === hero.id ? cutoffTime || null : item.daily?.promotion_until || null,
     }));
     const { error } = await supabase.from("daily_menu").upsert(dailyRows, { onConflict: "menu_item_id,menu_date" });
     if (error) throw new Error(`Could not prepare the category menu: ${error.message}`);
     const lines = [
       "❤️ *Neeru’s Home Kitchen*",
       "",
-      `*${category.name} Menu*`,
+      `🍽️ *${category.name} Menu*`,
+      "",
       values.message.trim(),
       "",
       ...categoryItems.flatMap((item) => [
@@ -1214,8 +1225,11 @@ export function AdminApp() {
         item.description || "Made fresh after you order.",
         "",
       ]),
-      category.description || "Made fresh after you order, so every portion is prepared just for you.",
-    ].filter((line, index, all) => line !== "" || all[index - 1] !== "");
+    ];
+    if (category.description?.trim() && category.description.trim() !== values.message.trim()) lines.push(category.description.trim(), "");
+    const timingLines = promotionTimingLines(values.deliveryDate, deliveryTime, cutoffTime);
+    if (timingLines.length) lines.push(...timingLines, "");
+    lines.push("Made fresh after you order, so every portion is prepared just for you.");
     const heroSlug = hero.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
     const url = `${window.location.origin}/c/${encodeURIComponent(category.slug)}/${encodeURIComponent(heroSlug || hero.id.slice(0, 8))}`;
     let imageFile: File | undefined;
@@ -1232,7 +1246,7 @@ export function AdminApp() {
       }
     }
     await loadMenu();
-    return { title: `${category.name} Menu · Neeru’s Home Kitchen`, text: lines.join("\n").trim(), url, image: imageFile };
+    return { title: `${category.name} Menu · Neeru’s Home Kitchen`, text: lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(), url, image: imageFile };
   }
 
   async function setAllDailyMenu(isAvailable: boolean) {
@@ -2427,13 +2441,14 @@ function CustomerField({ value, customers, onChange, onSelect }: { value: string
   );
 }
 
-function TimeField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function TimeField({ value, onChange, label = "Delivery time", optional = false, className = "" }: { value: string; onChange: (value: string) => void; label?: string; optional?: boolean; className?: string }) {
   const [open, setOpen] = useState(false);
-  const [rawHour = "12", rawMinute = "00"] = (value || "12:00").split(":");
+  const normalizedValue = ceilTimeToQuarter(value || "12:00");
+  const [rawHour = "12", rawMinute = "00"] = normalizedValue.split(":");
   const hour24 = Number(rawHour);
   const period = hour24 >= 12 ? "PM" : "AM";
   const hour = hour24 % 12 || 12;
-  const minute = String(Math.round(Number(rawMinute) / 5) * 5 % 60).padStart(2, "0");
+  const minute = rawMinute;
   const update = (nextHour: number, nextMinute: string, nextPeriod: string) => {
     const converted = nextHour === 12
       ? (nextPeriod === "AM" ? 0 : 12)
@@ -2441,19 +2456,19 @@ function TimeField({ value, onChange }: { value: string; onChange: (value: strin
     onChange(`${String(converted).padStart(2, "0")}:${nextMinute}`);
   };
   const display = value
-    ? `${String(hour).padStart(2, "0")}:${rawMinute} ${period}`
-    : "Choose delivery time";
+    ? formatTime12(normalizedValue)
+    : `Choose ${label.toLowerCase()}`;
   return (
-    <div className={`time-field ${open ? "open" : ""}`}>
-      <span>Delivery time</span>
+    <div className={`time-field ${className} ${open ? "open" : ""}`.trim()}>
+      <span>{label} {optional && <small>Optional</small>}</span>
       <button type="button" className="time-trigger" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
         <span><Clock3 size={20} />{display}</span><ChevronRight size={19} />
       </button>
       {open && (
         <div className="time-panel">
-          <div className="time-panel-head"><b>Select delivery time</b><button type="button" onClick={() => setOpen(false)}>Done</button></div>
+          <div className="time-panel-head"><b>Select {label.toLowerCase()}</b><div>{optional && value && <button type="button" className="time-clear" onClick={() => onChange("")}>Clear</button>}<button type="button" onClick={() => setOpen(false)}>Done</button></div></div>
           <div className="time-section"><span>Hour</span><div className="time-grid hours">{Array.from({ length: 12 }, (_, index) => index + 1).map((option) => <button type="button" className={hour === option ? "selected" : ""} key={option} onClick={() => update(option, minute, period)}>{String(option).padStart(2, "0")}</button>)}</div></div>
-          <div className="time-section"><span>Minutes</span><div className="time-grid minutes">{Array.from({ length: 12 }, (_, index) => String(index * 5).padStart(2, "0")).map((option) => <button type="button" className={minute === option ? "selected" : ""} key={option} onClick={() => update(hour, option, period)}>{option}</button>)}</div></div>
+          <div className="time-section"><span>Minutes</span><div className="time-grid minutes">{quarterHourMinutes.map((option) => <button type="button" className={minute === option ? "selected" : ""} key={option} onClick={() => update(hour, option, period)}>{option}</button>)}</div></div>
           <div className="time-section period-section"><span>Period</span><div className="time-grid period">{["AM", "PM"].map((option) => <button type="button" className={period === option ? "selected" : ""} key={option} onClick={() => update(hour, minute, option)}>{option}</button>)}</div></div>
         </div>
       )}
@@ -2599,7 +2614,9 @@ function PromotionModal({ item, category, categoryDishCount, onClose, onPrepare 
   const [message, setMessage] = useState(item.daily?.promotion_message || `Today’s special: ${item.name}, freshly prepared in our home kitchen.`);
   const [specialPrice, setSpecialPrice] = useState<string>(item.daily?.special_price === null || item.daily?.special_price === undefined ? "" : String(item.daily.special_price));
   const [portions, setPortions] = useState<string>(item.daily?.portions_available === null || item.daily?.portions_available === undefined ? "" : String(item.daily.portions_available));
-  const [until, setUntil] = useState(item.daily?.promotion_until || "");
+  const [deliveryDate, setDeliveryDate] = useState(today());
+  const [deliveryTime, setDeliveryTime] = useState("");
+  const [until, setUntil] = useState(ceilTimeToQuarter(item.daily?.promotion_until || ""));
   const [includeCategory, setIncludeCategory] = useState(false);
   const [prepared, setPrepared] = useState<PreparedPromotion | null>(null);
   const [busy, setBusy] = useState(false);
@@ -2614,6 +2631,11 @@ function PromotionModal({ item, category, categoryDishCount, onClose, onPrepare 
       setFeedback("Use a valid positive price and a whole number for portions.");
       return;
     }
+    if (deliveryDate && deliveryDate < today()) {
+      setError(true);
+      setFeedback("Choose today or a future delivery date.");
+      return;
+    }
     setBusy(true);
     setError(false);
     setFeedback("");
@@ -2623,6 +2645,8 @@ function PromotionModal({ item, category, categoryDishCount, onClose, onPrepare 
         specialPrice: parsedPrice,
         portions: parsedPortions,
         until,
+        deliveryDate,
+        deliveryTime,
         includeCategory,
       });
       setPrepared(result);
@@ -2654,7 +2678,9 @@ function PromotionModal({ item, category, categoryDishCount, onClose, onPrepare 
       <label className="wide"><span>WhatsApp message</span><textarea value={message} maxLength={280} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} placeholder="What makes this dish special today?" /></label>
       <label><span>Offer price <small>Optional</small></span><input type="number" min="0" value={specialPrice} onChange={(event) => { setSpecialPrice(event.target.value); setPrepared(null); }} placeholder={`Regular ${money(item.price)}`} /></label>
       <label><span>Limited portions <small>Optional</small></span><input type="number" min="0" value={portions} onChange={(event) => { setPortions(event.target.value); setPrepared(null); }} placeholder="For example, 10" /></label>
-      <label className="wide"><span>Order before <small>Optional</small></span><input type="time" value={until} onChange={(event) => { setUntil(event.target.value); setPrepared(null); }} /></label>
+      <label className="delivery-date-field"><span>Delivery date <small>Optional</small></span><input type="date" min={today()} value={deliveryDate} onChange={(event) => { setDeliveryDate(event.target.value); setPrepared(null); }} /></label>
+      <TimeField label="Delivery time" optional value={deliveryTime} onChange={(value) => { setDeliveryTime(value); setPrepared(null); }} />
+      <TimeField label="Order cut-off time" optional className="wide" value={until} onChange={(value) => { setUntil(value); setPrepared(null); }} />
     </div>
     {category && categoryDishCount > 1 && <label className="share-category-choice"><input type="checkbox" checked={includeCategory} onChange={(event) => { setIncludeCategory(event.target.checked); setPrepared(null); }} /><span><b>Also show the complete {category.name} category</b><small>{item.name} stays large and featured. The other {categoryDishCount - 1} dishes appear below with small photos, details and Add buttons.</small></span></label>}
     <p className="promotion-note"><MessageCircle /> {includeCategory && category ? `The WhatsApp preview features ${item.name}; tapping it opens the complete ${category.name} selection.` : "The WhatsApp preview and shared page feature only this dish."}</p>
@@ -2678,6 +2704,9 @@ function CategoryForm({ category, onClose, onSave }: { category: DishCategory | 
 function CategoryPromotionModal({ category, items, onClose, onPrepare }: { category: DishCategory; items: MenuItem[]; onClose: () => void; onPrepare: (category: DishCategory, values: CategoryPromotionValues) => Promise<PreparedPromotion> }) {
   const [heroId, setHeroId] = useState(items[0]?.id || "");
   const [message, setMessage] = useState(category.description || "Made fresh after you order, so every portion is prepared just for you.");
+  const [deliveryDate, setDeliveryDate] = useState(today());
+  const [deliveryTime, setDeliveryTime] = useState("");
+  const [until, setUntil] = useState("");
   const [prepared, setPrepared] = useState<PreparedPromotion | null>(null);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState(false);
@@ -2686,7 +2715,8 @@ function CategoryPromotionModal({ category, items, onClose, onPrepare }: { categ
   async function prepare() {
     setBusy(true); setError(false); setFeedback("");
     try {
-      const result = await onPrepare(category, { heroId, message });
+      if (deliveryDate && deliveryDate < today()) throw new Error("Choose today or a future delivery date.");
+      const result = await onPrepare(category, { heroId, message, deliveryDate, deliveryTime, until });
       setPrepared(result);
       setFeedback("Category menu is ready. The chosen dish will lead the shared page and the other dishes will appear as compact rows.");
     } catch (reason) {
@@ -2701,7 +2731,12 @@ function CategoryPromotionModal({ category, items, onClose, onPrepare }: { categ
   return <div className="modal-bg"><section className="modal category-promotion-modal">
     <div className="modal-head"><div><span className="eyebrow">SHARE CATEGORY MENU</span><h2>{category.name}</h2><p>Choose the large featured dish. Every other dish stays compact and easy to scan.</p></div><button className="icon-button" onClick={onClose}><X /></button></div>
     {hero && <div className="promotion-preview">{hero.photo_url ? <img src={hero.photo_url} alt={hero.name} /> : <span><ChefHat /></span>}<div><small>FEATURED DISH</small><b>{hero.name}</b><strong>{money(Number(hero.daily?.special_price ?? hero.price))} / {hero.unit_label || "portion"}</strong></div></div>}
-    <label className="category-promotion-message"><span>Menu introduction</span><textarea value={message} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} /></label>
+    <div className="promotion-form category-promotion-form">
+      <label className="wide"><span>Menu introduction</span><textarea value={message} onChange={(event) => { setMessage(event.target.value); setPrepared(null); }} /></label>
+      <label className="delivery-date-field"><span>Delivery date <small>Optional</small></span><input type="date" min={today()} value={deliveryDate} onChange={(event) => { setDeliveryDate(event.target.value); setPrepared(null); }} /></label>
+      <TimeField label="Delivery time" optional value={deliveryTime} onChange={(value) => { setDeliveryTime(value); setPrepared(null); }} />
+      <TimeField label="Order cut-off time" optional className="wide" value={until} onChange={(value) => { setUntil(value); setPrepared(null); }} />
+    </div>
     <div className="category-hero-list">{items.map((item) => <button type="button" className={item.id === heroId ? "selected" : ""} onClick={() => { setHeroId(item.id); setPrepared(null); }} key={item.id}>{item.photo_url ? <img src={item.photo_url} alt="" /> : <span><ChefHat /></span>}<span><b>{item.name}</b><small>{money(Number(item.daily?.special_price ?? item.price))} / {item.unit_label || "portion"}</small></span><i /></button>)}</div>
     {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
     {prepared && <a className="promotion-ready-link" href={prepared.url} target="_blank" rel="noreferrer"><ExternalLink /> Preview shared category</a>}
