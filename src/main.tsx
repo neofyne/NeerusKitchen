@@ -198,14 +198,15 @@ async function shareOrSaveFile(file: File) {
 }
 
 async function sharePromotion(prepared: PreparedPromotion) {
-  const data: ShareData = { title: prepared.title, text: `${prepared.text}\n\nOrder here: ${prepared.url}`, url: prepared.url };
+  const shareText = `${prepared.text}\n\n🛒 *Order now*\n${prepared.url}`;
+  const data: ShareData = { title: prepared.title, text: shareText };
   if (prepared.image) data.files = [prepared.image];
   const shareNavigator = navigator as Navigator & { canShare?: (value: ShareData) => boolean };
   if (shareNavigator.share && (!data.files || !shareNavigator.canShare || shareNavigator.canShare(data))) {
     await shareNavigator.share(data);
     return "Share sheet opened. Choose WhatsApp and the dish photo, offer and order link will be ready.";
   }
-  window.open(`https://wa.me/?text=${encodeURIComponent(`${prepared.text}\n\nOrder here: ${prepared.url}`)}`, "_blank", "noopener,noreferrer");
+  window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, "_blank", "noopener,noreferrer");
   return "WhatsApp opened with the offer and direct order link. The link generates the dish photo preview.";
 }
 const showLocalDevicePreview = import.meta.env.DEV && ["localhost", "127.0.0.1"].includes(window.location.hostname);
@@ -812,7 +813,8 @@ export function AdminApp() {
     if (values.specialPrice !== null && Number(values.specialPrice) < Number(item.price)) lines.push(`Regular price: ${money(item.price)}`);
     if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
     if (values.until) lines.push(`Order before ${values.until}`);
-    const url = `${window.location.origin}/share/dish?id=${encodeURIComponent(item.id)}`;
+    const dishSlug = item.name.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const url = `${window.location.origin}/d/${encodeURIComponent(dishSlug || item.id.slice(0, 8))}`;
     let imageFile: File | undefined;
     if (item.photo_url) {
       try {
@@ -2094,7 +2096,7 @@ function PromotionModal({ item, onClose, onPrepare }: { item: MenuItem; onClose:
     </div>
     <p className="promotion-note"><MessageCircle /> Sharing creates a dish-specific WhatsApp preview with its image. Customers tap it, see this offer, add the dish and order.</p>
     {feedback && <p className={`settings-message ${error ? "error" : "success"}`}>{feedback}</p>}
-    {prepared && <a className="promotion-ready-link" href={prepared.url.replace("/share/dish?id=", "/?dish=")} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Preview what customers will see</a>}
+    {prepared && <a className="promotion-ready-link" href={prepared.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /> Preview what customers will see</a>}
     <div className="modal-actions promotion-actions"><button type="button" className="cancel" onClick={onClose}>Close</button><span />{prepared ? <button type="button" className="save whatsapp-share-button" onClick={share}><MessageCircle /> Share now</button> : <button type="button" className="save" disabled={busy || !message.trim()} onClick={prepare}><Check /> {busy ? "Preparing…" : "Save offer & prepare"}</button>}</div>
   </section></div>;
 }

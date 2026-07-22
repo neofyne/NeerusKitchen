@@ -20,6 +20,16 @@ const escapeHtml = (value: unknown) => String(value ?? "")
   .replace(/"/g, "&quot;")
   .replace(/'/g, "&#039;");
 
+const dishSlug = (value: string) => value
+  .toLowerCase()
+  .normalize("NFKD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .replace(/[^a-z0-9]+/g, "-")
+  .replace(/^-+|-+$/g, "");
+const safeDecode = (value: string) => {
+  try { return decodeURIComponent(value); } catch { return ""; }
+};
+
 const indiaDate = () => {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
@@ -28,23 +38,25 @@ const indiaDate = () => {
 
 export default async (request: Request) => {
   const requestUrl = new URL(request.url);
-  const id = requestUrl.searchParams.get("id") || "";
+  const legacyId = requestUrl.searchParams.get("id") || "";
+  const slug = requestUrl.pathname.startsWith("/d/") ? safeDecode(requestUrl.pathname.slice(3)).replace(/\/+$/, "") : "";
   const supabaseUrl = process.env.VITE_SUPABASE_URL || "";
   const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY || "";
   const origin = requestUrl.origin;
-  const orderUrl = `${origin}/?dish=${encodeURIComponent(id)}`;
-  if (!/^[0-9a-f-]{36}$/i.test(id) || !supabaseUrl || !supabaseKey) return Response.redirect(origin, 302);
+  if ((!/^[0-9a-f-]{36}$/i.test(legacyId) && !/^[a-z0-9-]{1,100}$/.test(slug)) || !supabaseUrl || !supabaseKey) return Response.redirect(origin, 302);
 
   const headers = { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` };
-  const [menuResponse, dailyResponse] = await Promise.all([
-    fetch(`${supabaseUrl}/rest/v1/menu_items?id=eq.${encodeURIComponent(id)}&is_active=eq.true&select=id,name,price,description,photo_path&limit=1`, { headers }),
-    fetch(`${supabaseUrl}/rest/v1/daily_menu?menu_item_id=eq.${encodeURIComponent(id)}&menu_date=eq.${indiaDate()}&select=is_available,is_featured,special_price,portions_available,promotion_message,promotion_until&limit=1`, { headers }),
-  ]);
+  const menuQuery = legacyId
+    ? `id=eq.${encodeURIComponent(legacyId)}&is_active=eq.true&select=id,name,price,description,photo_path&limit=1`
+    : "is_active=eq.true&select=id,name,price,description,photo_path&limit=200";
+  const menuResponse = await fetch(`${supabaseUrl}/rest/v1/menu_items?${menuQuery}`, { headers });
   if (!menuResponse.ok) return Response.redirect(origin, 302);
   const menuRows = await menuResponse.json() as Array<{ id: string; name: string; price: number; description: string; photo_path: string | null }>;
-  const dailyRows = dailyResponse.ok ? await dailyResponse.json() as Array<{ is_available: boolean; special_price: number | null; portions_available: number | null; promotion_message: string; promotion_until: string | null }> : [];
-  const item = menuRows[0];
+  const item = legacyId ? menuRows[0] : menuRows.find((candidate) => dishSlug(candidate.name) === slug);
   if (!item) return Response.redirect(origin, 302);
+  const dailyResponse = await fetch(`${supabaseUrl}/rest/v1/daily_menu?menu_item_id=eq.${encodeURIComponent(item.id)}&menu_date=eq.${indiaDate()}&select=is_available,is_featured,special_price,portions_available,promotion_message,promotion_until&limit=1`, { headers });
+  const dailyRows = dailyResponse.ok ? await dailyResponse.json() as Array<{ is_available: boolean; special_price: number | null; portions_available: number | null; promotion_message: string; promotion_until: string | null }> : [];
+  const orderUrl = `${origin}/?dish=${encodeURIComponent(item.id)}`;
   const daily = dailyRows[0];
   const price = Number(daily?.special_price ?? item.price ?? 0);
   const limited = daily?.portions_available === null || daily?.portions_available === undefined ? "" : ` Only ${daily.portions_available} portions available.`;
@@ -69,4 +81,4 @@ export default async (request: Request) => {
   });
 };
 
-export const config: Config = { path: "/share/dish" };
+export const config: Config = { path: ["/share/dish", "/d/:slug"] };
