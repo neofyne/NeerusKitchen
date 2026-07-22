@@ -117,6 +117,7 @@ type ExportFormat = "csv" | "xlsx";
 type StorageSection = { count: number; knownBytes: number; unknownSizes: number };
 type StorageSummary = { orders: StorageSection; menu: StorageSection; payment: StorageSection };
 type CleanupAction = "delivered-photos" | "all-order-photos" | "all-menu-photos" | "delivered-orders" | "all-orders";
+type OrderDeletionReason = "cancelled" | "unpaid" | "duplicate" | "mistake" | "unavailable" | "other";
 type PromotionValues = { message: string; specialPrice: number | null; portions: number | null; until: string };
 type PreparedPromotion = { title: string; text: string; url: string; image?: File };
 type AdminStoreSettings = {
@@ -299,6 +300,8 @@ export function AdminApp() {
   const [dark, setDark] = useState(() => localStorage.getItem("neeru-theme") === "dark");
   const [phonePreview, setPhonePreview] = useState(false);
   const [editing, setEditing] = useState<Order | null>(null);
+  const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
@@ -957,24 +960,51 @@ export function AdminApp() {
       loadOrders();
     }
   }
-  async function deleteOrder(id: string) {
-    if (!supabase || !confirm("Delete this order?")) return;
-    const currentOrder = orders.find((order) => order.id === id);
-    if (currentOrder?.photo_path) {
-      try {
+  async function deleteOrder(order: Order, reason: OrderDeletionReason) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    setDeleteBusy(true);
+    const currentOrder = orders.find((item) => item.id === order.id) || order;
+    let photoDeleted = false;
+    try {
+      if (currentOrder?.photo_path) {
         await deletePhotoKeys([currentOrder.photo_path]);
-      } catch (error) {
-        setNotice(error instanceof Error ? `Order was not deleted. ${error.message}` : "Order was not deleted because its photo could not be removed.");
-        return;
+        photoDeleted = true;
+        if (currentOrder.photo_url?.startsWith("blob:")) URL.revokeObjectURL(currentOrder.photo_url);
       }
-    }
-    const { error } = await supabase.from("orders").delete().eq("id", id);
-    if (error) setNotice(`Could not delete: ${error.message}`);
-    else {
+      const { data, error } = await supabase.from("orders").delete().eq("id", order.id).select("id").maybeSingle();
+      if (error || !data) {
+        if (photoDeleted) {
+          await supabase.from("orders").update({ photo_path: null }).eq("id", order.id);
+          setOrders((current) => current.map((item) => item.id === order.id ? { ...item, photo_path: null, photo_url: undefined } : item));
+        }
+        throw new Error(`Could not delete the order: ${error?.message || "the record was not removed"}.${photoDeleted ? " Its private photo was still removed safely." : ""}`);
+      }
+      const reasonLabels: Record<OrderDeletionReason, string> = {
+        cancelled: "customer cancellation",
+        unpaid: "non-payment",
+        duplicate: "duplicate entry",
+        mistake: "entry mistake",
+        unavailable: "kitchen unavailable",
+        other: "other reason",
+      };
+      setOrders((current) => current.filter((item) => item.id !== order.id));
+      setNotificationOrders((current) => current.filter((item) => item.id !== order.id));
       setEditing(null);
-      loadOrders();
+      setDeletingOrder(null);
+      setNotice(`${order.customer_name}'s order was permanently deleted for ${reasonLabels[reason]}. It no longer affects orders, revenue or payment totals${photoDeleted ? ", and its private photo was deleted and verified" : ""}.`);
+      await Promise.all([loadOrders(), loadCustomers(), loadActionCenter(false)]);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Could not delete the order:")) throw error;
+      throw new Error(error instanceof Error ? `Order was not deleted. ${error.message}` : "Order was not deleted because its private photo or database record could not be removed.");
+    } finally {
+      setDeleteBusy(false);
     }
   }
+
+  const requestOrderDeletion = (order: Order) => {
+    setEditing(null);
+    setDeletingOrder(order);
+  };
 
   const openNewOrder = () => {
     setEditing(null);
@@ -1145,9 +1175,9 @@ export function AdminApp() {
               ) : filtered.length === 0 ? (
                 <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
-                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} />
+                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
               ) : (
-                <OrderList orders={filtered} menuItems={menuItems} onEdit={openExistingOrder} onUpdate={updateOrder} />
+                <OrderList orders={filtered} menuItems={menuItems} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
               )}
             </>
           ) : screen === "menu" ? (
@@ -1189,9 +1219,10 @@ export function AdminApp() {
             customers={customers}
             onClose={() => { setAdding(false); setEditing(null); sessionStorage.removeItem("neeru-prefill"); }}
             onSave={saveOrder}
-            onDelete={editing ? () => deleteOrder(editing.id) : undefined}
+            onDelete={editing ? () => requestOrderDeletion(editing) : undefined}
           />
         )}
+        {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
         {promotingItem && <PromotionModal item={promotingItem} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
       </div>
@@ -1353,7 +1384,7 @@ function menuImageFor(order: Order, menuItems: MenuItem[]) {
   const details = order.order_details.toLowerCase();
   return menuItems.find((item) => details.includes(item.name.toLowerCase()))?.photo_url;
 }
-function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void }) {
+function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
   const canDeliver = order.stage !== "delivered";
   const image = order.photo_url || menuImageFor(order, menuItems);
   const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
@@ -1375,7 +1406,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
         {order.payment_reference && <p className="payment-reference"><ReceiptText size={13} /><span>UPI reference</span><b>{order.payment_reference}</b></p>}
         <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
-          <button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit details</button>
+          <span className="card-secondary-actions"><button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit</button><button className="delete-order-action" onClick={(e) => { e.stopPropagation(); onDelete(order); }}><Trash2 size={13} /> Delete</button></span>
           {canDeliver
             ? <button className="move-order" onClick={(e) => { e.stopPropagation(); if (confirm(`Mark ${order.customer_name}'s order as delivered?`)) onUpdate(order.id, { stage: "delivered" }); }}>Mark delivered<Check size={16} /></button>
             : <button className="move-order restore-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "new" }); }}>Back to Orders<RotateCcw size={15} /></button>}
@@ -1385,7 +1416,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate }: { order: Order; menuI
   );
 }
 
-function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate }: { orders: Order[]; menuItems: MenuItem[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void }) {
+function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDelete }: { orders: Order[]; menuItems: MenuItem[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
   return (
     <>
       <div className="stage-tabs">
@@ -1397,7 +1428,7 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate }: { 
           return <div className={`column column-${stage.color} ${activeStage === stage.key ? "mobile-active" : ""}`} key={stage.key}>
             <div className="column-title"><span><i />{stage.label}</span><b>{stageOrders.length}</b></div>
             <div className="column-orders">
-              {stageOrders.map((o) => <OrderCard key={o.id} order={o} menuItems={menuItems} onEdit={onEdit} onUpdate={onUpdate} />)}
+              {stageOrders.map((o) => <OrderCard key={o.id} order={o} menuItems={menuItems} onEdit={onEdit} onUpdate={onUpdate} onDelete={onDelete} />)}
               {!stageOrders.length && <div className="column-empty"><Check size={18} /><span>No orders here</span></div>}
             </div>
           </div>;
@@ -1407,7 +1438,7 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate }: { 
   );
 }
 
-function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void }) {
+function OrderList({ orders, menuItems, onEdit, onUpdate, onDelete }: { orders: Order[]; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
   return <div className="order-list">{orders.map((o, i) => {
     const image = o.photo_url || menuImageFor(o, menuItems);
     return <div className="order-row" key={o.id} onClick={() => onEdit(o)}>
@@ -1418,6 +1449,7 @@ function OrderList({ orders, menuItems, onEdit, onUpdate }: { orders: Order[]; m
       <b className="row-amount">{money(Number(o.amount))}</b>
       <StageBadge stage={o.stage} />
       <button className={`${o.is_paid ? "paid yes" : "paid"} ${o.payment_status === "submitted" ? "submitted" : ""}`} title={o.payment_reference ? `UPI reference: ${o.payment_reference}` : undefined} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : o.payment_status === "submitted" ? "Verify" : "Pending"}</button>
+      <button className="row-delete-order" aria-label={`Delete ${o.customer_name}'s order`} title="Delete order" onClick={(event) => { event.stopPropagation(); onDelete(o); }}><Trash2 /></button>
     </div>;
   })}</div>;
 }
@@ -1893,6 +1925,34 @@ function TimeField({ value, onChange }: { value: string; onChange: (value: strin
   );
 }
 
+function DeleteOrderModal({ order, busy, onClose, onConfirm }: { order: Order; busy: boolean; onClose: () => void; onConfirm: (reason: OrderDeletionReason) => Promise<void> }) {
+  const [reason, setReason] = useState<OrderDeletionReason>("cancelled");
+  const [error, setError] = useState("");
+
+  async function confirmDeletion(event: FormEvent) {
+    event.preventDefault();
+    setError("");
+    try {
+      await onConfirm(reason);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "The order could not be deleted.");
+    }
+  }
+
+  return (
+    <div className="modal-bg delete-order-bg" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <form className="modal delete-order-modal" onSubmit={confirmDeletion}>
+        <div className="delete-order-head"><span className="delete-order-icon"><Trash2 /></span><div><span className="eyebrow">PERMANENT ACTION</span><h2>Delete this order?</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={busy}><X /></button></div>
+        <div className="delete-order-summary"><span><b>{order.customer_name}</b><small>Flat {order.flat_number}</small></span><strong>{money(Number(order.amount))}</strong><p>{order.order_details}</p></div>
+        <label className="delete-reason"><span>Reason for deletion</span><select value={reason} onChange={(event) => setReason(event.target.value as OrderDeletionReason)}><option value="cancelled">Customer cancelled</option><option value="unpaid">Payment not received</option><option value="duplicate">Duplicate order</option><option value="mistake">Entered by mistake</option><option value="unavailable">Kitchen unable to fulfil</option><option value="other">Other reason</option></select></label>
+        <div className="delete-order-warning"><ShieldCheck /><span><b>Removed completely</b><small>This order will disappear from order counts, revenue and payment totals. {order.photo_path ? "Its attached private photo will be deleted and verified first." : "No private order photo is attached."}</small></span></div>
+        {error && <p className="settings-message error" role="alert">{error}</p>}
+        <div className="delete-order-actions"><button type="button" className="cancel" onClick={onClose} disabled={busy}>Keep order</button><button className="confirm-delete" disabled={busy}><Trash2 size={17} /> {busy ? "Deleting safely…" : "Delete permanently"}</button></div>
+      </form>
+    </div>
+  );
+}
+
 function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: { draft: Draft | Order; menuItems: MenuItem[]; customers: CustomerProfile[]; onClose: () => void; onSave: (d: Draft, photo?: File) => void; onDelete?: () => void }) {
   const prefill = !('id' in draft) ? sessionStorage.getItem("neeru-prefill") : null;
   const prefillItem = prefill ? JSON.parse(prefill) as MenuItem : null;
@@ -1967,7 +2027,7 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
           <div className="wide quick">{["Less spicy", "No onion", "Extra pickle", "Call before delivery", "Send curd", "No green chilli"].map((t) => <button type="button" key={t} onClick={() => set("remarks", form.remarks ? `${form.remarks}, ${t}` : t)}><Plus size={13} />{t}</button>)}</div>
           <label className="wide photo-upload"><span><Camera size={18} /> Add a temporary order photo <small>Optional</small></span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPhotoPreview(URL.createObjectURL(file)); }} /><div className="photo-drop">{photoPreview ? <img src={photoPreview} alt="Selected order" /> : <><Camera /><b>Take photo or choose from phone</b><small>{form.photo_path ? "A photo is attached. A replacement will be compressed automatically." : "Compressed to a tiny 360 px thumbnail and deleted after delivery"}</small></>}</div></label>
         </div>
-        <div className="modal-actions">{onDelete && <button type="button" className="delete" onClick={onDelete}><Trash2 size={18} /> Delete</button>}<span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check size={19} /> Save order</button></div>
+        <div className="modal-actions">{onDelete && <button type="button" className="delete" onClick={onDelete}><Trash2 size={18} /> Delete order</button>}<span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check size={19} /> Save order</button></div>
       </form>
     </div>
   );
