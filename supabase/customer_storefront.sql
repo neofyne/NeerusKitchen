@@ -112,12 +112,13 @@ security definer
 set search_path = public
 as $$
 begin
-  insert into public.customer_profiles (id, full_name, flat_number, email)
+  insert into public.customer_profiles (id, full_name, flat_number, email, phone)
   values (
     new.id,
     coalesce(new.raw_user_meta_data ->> 'full_name', ''),
     coalesce(new.raw_user_meta_data ->> 'flat_number', ''),
-    coalesce(new.email, '')
+    coalesce(new.email, ''),
+    coalesce(new.phone, new.raw_user_meta_data ->> 'phone', '')
   )
   on conflict (id) do nothing;
   return new;
@@ -129,8 +130,8 @@ create trigger on_auth_user_created_customer_profile
 after insert on auth.users
 for each row execute function public.handle_new_customer();
 
-insert into public.customer_profiles (id, full_name, flat_number, email)
-select id, coalesce(raw_user_meta_data ->> 'full_name', ''), coalesce(raw_user_meta_data ->> 'flat_number', ''), coalesce(email, '')
+insert into public.customer_profiles (id, full_name, flat_number, email, phone)
+select id, coalesce(raw_user_meta_data ->> 'full_name', ''), coalesce(raw_user_meta_data ->> 'flat_number', ''), coalesce(email, ''), coalesce(phone, raw_user_meta_data ->> 'phone', '')
 from auth.users
 on conflict (id) do nothing;
 

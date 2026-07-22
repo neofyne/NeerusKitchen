@@ -126,6 +126,13 @@ const splitFlatAddress = (value = "") => {
   return match ? { wing: match[1] as Wing, number: match[2] } : { wing: "" as Wing, number: normalized.replace(/\D/g, "") };
 };
 const flatAddress = (wing: Wing, number: string) => `${wing}-${number}`;
+const normalizeIndianPhone = (value: string) => {
+  let digits = value.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
+  if (digits.length === 10 && /^[6-9]/.test(digits)) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith("91") && /^[6-9]/.test(digits.slice(2))) return `+${digits}`;
+  return "";
+};
 
 export function Storefront() {
   const [view, setView] = useState<StoreView>("menu");
@@ -330,6 +337,12 @@ function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () =>
 
 function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
   const [mode, setMode] = useState<"login" | "register">("register");
+  const [method, setMethod] = useState<"phone" | "email">("phone");
+  const [phone, setPhone] = useState("");
+  const [verifiedPhone, setVerifiedPhone] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [resendIn, setResendIn] = useState(0);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
@@ -339,7 +352,12 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [messageIsSuccess, setMessageIsSuccess] = useState(false);
-  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
+
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const timer = window.setInterval(() => setResendIn((current) => Math.max(0, current - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [resendIn]);
 
   function updateFlat(value: string) {
     if (/\D/.test(value)) {
@@ -351,8 +369,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
     setFlat(value);
   }
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
+  async function requestPhoneCode() {
     if (!supabase) return;
     setMessage("");
     setMessageIsSuccess(false);
@@ -361,50 +378,119 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
       setMessage(!wing ? "Please choose your building wing." : "Please enter your flat number.");
       return;
     }
-    setBusy(true);
-    if (mode === "login") {
-      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-      setBusy(false);
-      if (error) setMessage("That email or password is not correct."); else onSuccess();
+    const formattedPhone = normalizeIndianPhone(phone);
+    if (!formattedPhone) {
+      setMessage("Enter a valid 10-digit Indian mobile number.");
       return;
     }
-    const { data, error } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: window.location.origin, data: { full_name: name.trim(), flat_number: flatAddress(wing, flat) } } });
+    setBusy(true);
+    const options = mode === "register"
+      ? { shouldCreateUser: true, data: { full_name: name.trim(), flat_number: flatAddress(wing, flat), phone: formattedPhone } }
+      : { shouldCreateUser: false };
+    const { error } = await supabase.auth.signInWithOtp({ phone: formattedPhone, options });
     setBusy(false);
-    if (error) return setMessage(error.message);
-    if (data.user?.identities?.length === 0) {
-      setAwaitingConfirmation(true);
-      return setMessage("This email may already have an account. Try Sign in, or resend the confirmation email below.");
+    if (error) {
+      if (/unsupported phone provider|phone provider is disabled/i.test(error.message)) {
+        return setMessage("Phone sign-in is not active yet. Please use your existing email login for now.");
+      }
+      if (mode === "login" && /signups not allowed|user not found/i.test(error.message)) {
+        return setMessage("We could not find this mobile number. Choose New customer to create an account.");
+      }
+      return setMessage(error.message);
     }
-    if (!data.session) {
-      setAwaitingConfirmation(true);
-      setMessageIsSuccess(true);
-      return setMessage(`We sent a confirmation link to ${email.trim()}. Check Spam or Promotions too.`);
+    setVerifiedPhone(formattedPhone);
+    setOtpSent(true);
+    setOtp("");
+    setResendIn(60);
+    setMessageIsSuccess(true);
+    setMessage(`A 6-digit code was sent to +91 ${formattedPhone.slice(-10, -5)} ${formattedPhone.slice(-5)}.`);
+  }
+
+  async function verifyPhoneCode() {
+    if (!supabase || !verifiedPhone) return;
+    if (!/^\d{6}$/.test(otp)) {
+      setMessageIsSuccess(false);
+      setMessage("Enter the complete 6-digit code.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    const { data, error } = await supabase.auth.verifyOtp({ phone: verifiedPhone, token: otp, type: "sms" });
+    setBusy(false);
+    if (error || !data.session) {
+      setMessageIsSuccess(false);
+      setMessage(error?.message || "That code could not be verified. Please try again.");
+      return;
     }
     onSuccess();
   }
 
-  async function resendConfirmation() {
-    if (!supabase || !email.trim()) return;
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!supabase) return;
+    if (method === "phone") {
+      if (otpSent) await verifyPhoneCode();
+      else await requestPhoneCode();
+      return;
+    }
     setBusy(true);
     setMessage("");
-    const { error } = await supabase.auth.resend({ type: "signup", email: email.trim(), options: { emailRedirectTo: window.location.origin } });
+    setMessageIsSuccess(false);
+    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
     setBusy(false);
-    setMessageIsSuccess(!error);
-    setMessage(error ? error.message : `A new confirmation link was sent to ${email.trim()}.`);
+    if (error) setMessage("That email or password is not correct."); else onSuccess();
   }
 
   function switchMode(next: "login" | "register") {
     setMode(next);
+    setMethod("phone");
+    setOtpSent(false);
+    setVerifiedPhone("");
+    setOtp("");
     setMessage("");
     setMessageIsSuccess(false);
-    setAwaitingConfirmation(false);
   }
 
-  return <div className="store-modal-bg"><section className="auth-sheet"><button className="sheet-close" onClick={onClose}><X /></button><StoreLogo /><span className="store-eyebrow">WELCOME TO NEERU’S</span><h2>{mode === "register" ? "Create your account" : "Welcome back"}</h2><p>{mode === "register" ? "Save your address for faster ordering." : "Sign in to order and follow your meals."}</p><div className="auth-tabs"><button className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>New customer</button><button className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>Sign in</button></div><form onSubmit={submit}>{mode === "register" && <><label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div></>}<label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label><label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === "login" ? "current-password" : "new-password"} required /></label>{message && <div className={`auth-message ${messageIsSuccess ? "success" : ""}`}>{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Please wait…" : mode === "register" ? "Create account" : "Sign in"}</button>{awaitingConfirmation && <button className="resend-confirmation" type="button" disabled={busy} onClick={resendConfirmation}>Resend confirmation email</button>}</form><small>By continuing, you agree to use your details only for kitchen orders and delivery.</small></section></div>;
+  return <div className="store-modal-bg"><section className="auth-sheet">
+    <button className="sheet-close" onClick={onClose}><X /></button>
+    <StoreLogo />
+    <span className="store-eyebrow">WELCOME TO NEERU’S</span>
+    <h2>{otpSent ? "Enter your code" : mode === "register" ? "Create your account" : "Welcome back"}</h2>
+    <p>{otpSent ? "We use this one-time code to verify your mobile number securely." : mode === "register" ? "One quick verification, then ordering stays fast." : "Sign in to order and follow your meals."}</p>
+    <div className="auth-tabs">
+      <button type="button" className={mode === "register" ? "active" : ""} onClick={() => switchMode("register")}>New customer</button>
+      <button type="button" className={mode === "login" ? "active" : ""} onClick={() => switchMode("login")}>Returning customer</button>
+    </div>
+    <form onSubmit={submit}>
+      {method === "phone" ? <>
+        {!otpSent && mode === "register" && <>
+          <label><span>Your name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label>
+          <div className="flat-address-fields">
+            <label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label>
+            <label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="signup-flat-warning" required />{flatWarning && <small id="signup-flat-warning" className="field-warning-text">{flatWarning}</small>}</label>
+          </div>
+        </>}
+        {!otpSent ? <label><span>Mobile number</span><div className="phone-field"><b>+91</b><input type="tel" inputMode="numeric" autoComplete="tel-national" value={phone} onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" required /></div></label> : <>
+          <div className="otp-destination"><span>Code sent to</span><b>+91 {verifiedPhone.slice(-10, -5)} {verifiedPhone.slice(-5)}</b><button type="button" onClick={() => { setOtpSent(false); setMessage(""); }}>Change</button></div>
+          <label><span>6-digit verification code</span><input className="otp-input" type="text" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} value={otp} onChange={(event) => setOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="• • • • • •" autoFocus required /></label>
+        </>}
+      </> : <>
+        <label><span>Email address</span><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required /></label>
+        <label><span>Password</span><input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
+      </>}
+      {message && <div className={`auth-message ${messageIsSuccess ? "success" : ""}`}>{message}</div>}
+      <button className="store-primary" disabled={busy}>{busy ? "Please wait…" : method === "email" ? "Sign in with email" : otpSent ? "Verify and continue" : "Send verification code"}</button>
+      {method === "phone" && otpSent && <button className="resend-confirmation" type="button" disabled={busy || resendIn > 0} onClick={requestPhoneCode}>{resendIn > 0 ? `Send another code in ${resendIn}s` : "Send another code"}</button>}
+    </form>
+    <button className="auth-method-switch" type="button" onClick={() => { setMethod(method === "phone" ? "email" : "phone"); setMode("login"); setOtpSent(false); setMessage(""); }}>{method === "phone" ? "Have an older email account? Sign in with email" : "Use mobile number and OTP instead"}</button>
+    <small>Your verified session is saved securely on this phone until you sign out.</small>
+  </section></div>;
 }
 
 function AccountView({ session, profile, onSaved, onBack }: { session: Session; profile: Profile | null; onSaved: (profile: Profile) => void; onBack: () => void }) {
-  const defaultProfile = profile || { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: "", spice_preference: "mild" as Spice, standing_instructions: "" };
+  const defaultProfile = profile
+    ? { ...profile, email: profile.email || session.user.email || "", phone: profile.phone || session.user.phone || "" }
+    : { id: session.user.id, full_name: String(session.user.user_metadata.full_name || ""), flat_number: String(session.user.user_metadata.flat_number || ""), email: session.user.email || "", phone: session.user.phone || "", spice_preference: "mild" as Spice, standing_instructions: "" };
   const initialAddress = splitFlatAddress(defaultProfile.flat_number);
   const [form, setForm] = useState<Profile>(defaultProfile);
   const [wing, setWing] = useState<Wing>(initialAddress.wing);
@@ -413,6 +499,15 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const set = <K extends keyof Profile>(key: K, value: Profile[K]) => setForm((current) => ({ ...current, [key]: value }));
+
+  useEffect(() => {
+    if (!profile) return;
+    const next = { ...profile, email: profile.email || session.user.email || "", phone: profile.phone || session.user.phone || "" };
+    const address = splitFlatAddress(next.flat_number);
+    setForm(next);
+    setWing(address.wing);
+    setFlat(address.number);
+  }, [profile, session.user.email, session.user.phone]);
 
   function updateFlat(value: string) {
     if (/\D/.test(value)) {
@@ -436,7 +531,7 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
     const { error } = await supabase.from("customer_profiles").upsert(next);
     setBusy(false); if (error) setMessage(error.message); else onSaved(next);
   }
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div><label><span>Email</span><input value={form.email} disabled /></label><label><span>Phone <small>Optional</small></span><input type="tel" value={form.phone} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Wing</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Wing {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
 function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder) => void }) {
