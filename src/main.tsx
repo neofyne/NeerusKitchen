@@ -303,6 +303,8 @@ export function AdminApp() {
   const [editing, setEditing] = useState<Order | null>(null);
   const [deletingOrder, setDeletingOrder] = useState<Order | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deliveringOrder, setDeliveringOrder] = useState<Order | null>(null);
+  const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
@@ -934,7 +936,7 @@ export function AdminApp() {
   }
 
   async function updateOrder(id: string, changes: Partial<Order>) {
-    if (!supabase) return;
+    if (!supabase) return false;
     const currentOrder = orders.find((order) => order.id === id);
     const isDelivering = changes.stage === "delivered";
     let deliveryPhotoDeleted = false;
@@ -944,7 +946,7 @@ export function AdminApp() {
         deliveryPhotoDeleted = true;
       } catch (error) {
         setNotice(error instanceof Error ? `Not marked delivered. ${error.message}` : "Not marked delivered because its photo could not be deleted.");
-        return;
+        return false;
       }
     }
     const deliveryChanges = isDelivering ? { ...changes, photo_path: null } : changes;
@@ -955,11 +957,23 @@ export function AdminApp() {
     if (error || !data) {
       if (deliveryPhotoDeleted) await supabase.from("orders").update({ photo_path: null }).eq("id", id);
       setNotice(`Could not update: ${error?.message || "the order was not changed"}${deliveryPhotoDeleted ? ". The temporary photo was still removed safely." : ""}`);
+      return false;
     }
     else {
       setOrders((current) => current.map((order) => order.id === id ? { ...order, ...record, stage: normalizeStage(data.stage) } as Order : order));
       if (isDelivering) setNotice(currentOrder?.photo_path ? "Marked delivered. The temporary photo was deleted and verified first." : "Marked delivered. No temporary photo was attached.");
       loadOrders();
+      return true;
+    }
+  }
+
+  async function confirmOrderDelivery(order: Order) {
+    setDeliveryBusy(true);
+    try {
+      const updated = await updateOrder(order.id, { stage: "delivered" });
+      if (updated) setDeliveringOrder(null);
+    } finally {
+      setDeliveryBusy(false);
     }
   }
   async function deleteOrder(order: Order, reason: OrderDeletionReason) {
@@ -1177,7 +1191,7 @@ export function AdminApp() {
               ) : filtered.length === 0 ? (
                 <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
-                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
+                <Board orders={filtered} menuItems={menuItems} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} onDeliver={setDeliveringOrder} />
               ) : (
                 <OrderList orders={filtered} menuItems={menuItems} onEdit={openExistingOrder} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
               )}
@@ -1225,6 +1239,7 @@ export function AdminApp() {
           />
         )}
         {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
+        {deliveringOrder && <CompleteDeliveryModal order={deliveringOrder} busy={deliveryBusy} onClose={() => { if (!deliveryBusy) setDeliveringOrder(null); }} onConfirm={() => confirmOrderDelivery(deliveringOrder)} />}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
         {promotingItem && <PromotionModal item={promotingItem} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
       </div>
@@ -1386,7 +1401,7 @@ function menuImageFor(order: Order, menuItems: MenuItem[]) {
   const details = order.order_details.toLowerCase();
   return menuItems.find((item) => details.includes(item.name.toLowerCase()))?.photo_url;
 }
-function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
+function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete, onDeliver }: { order: Order; menuItems: MenuItem[]; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
   const canDeliver = order.stage !== "delivered";
   const image = order.photo_url || menuImageFor(order, menuItems);
   const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
@@ -1410,7 +1425,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete }: { order: Or
         <div className="card-footer">
           <span className="card-secondary-actions"><button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit</button><button className="delete-order-action" onClick={(e) => { e.stopPropagation(); onDelete(order); }}><Trash2 size={13} /> Delete</button></span>
           {canDeliver
-            ? <button className="move-order" onClick={(e) => { e.stopPropagation(); if (confirm(`Mark ${order.customer_name}'s order as delivered?`)) onUpdate(order.id, { stage: "delivered" }); }}>Mark delivered<Check size={16} /></button>
+            ? <button className="move-order" onClick={(e) => { e.stopPropagation(); onDeliver(order); }}>Mark delivered<Check size={16} /></button>
             : <button className="move-order restore-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "new" }); }}>Back to Orders<RotateCcw size={15} /></button>}
         </div>
       </div>
@@ -1418,7 +1433,7 @@ function OrderCard({ order, menuItems, onEdit, onUpdate, onDelete }: { order: Or
   );
 }
 
-function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDelete }: { orders: Order[]; menuItems: MenuItem[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
+function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDelete, onDeliver }: { orders: Order[]; menuItems: MenuItem[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
   return (
     <>
       <div className="stage-tabs">
@@ -1430,7 +1445,7 @@ function Board({ orders, menuItems, activeStage, onStage, onEdit, onUpdate, onDe
           return <div className={`column column-${stage.color} ${activeStage === stage.key ? "mobile-active" : ""}`} key={stage.key}>
             <div className="column-title"><span><i />{stage.label}</span><b>{stageOrders.length}</b></div>
             <div className="column-orders">
-              {stageOrders.map((o) => <OrderCard key={o.id} order={o} menuItems={menuItems} onEdit={onEdit} onUpdate={onUpdate} onDelete={onDelete} />)}
+              {stageOrders.map((o) => <OrderCard key={o.id} order={o} menuItems={menuItems} onEdit={onEdit} onUpdate={onUpdate} onDelete={onDelete} onDeliver={onDeliver} />)}
               {!stageOrders.length && <div className="column-empty"><Check size={18} /><span>No orders here</span></div>}
             </div>
           </div>;
@@ -1923,6 +1938,19 @@ function TimeField({ value, onChange }: { value: string; onChange: (value: strin
           <div className="time-section period-section"><span>Period</span><div className="time-grid period">{["AM", "PM"].map((option) => <button type="button" className={period === option ? "selected" : ""} key={option} onClick={() => update(hour, minute, option)}>{option}</button>)}</div></div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CompleteDeliveryModal({ order, busy, onClose, onConfirm }: { order: Order; busy: boolean; onClose: () => void; onConfirm: () => Promise<void> }) {
+  return (
+    <div className="modal-bg delivery-confirm-bg" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <section className="modal delivery-confirm-modal">
+        <div className="delivery-confirm-head"><span className="delivery-confirm-icon"><Check /></span><div><span className="eyebrow">COMPLETE DELIVERY</span><h2>Mark as delivered?</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={busy}><X /></button></div>
+        <div className="delivery-confirm-summary"><span><b>{order.customer_name}</b><small>Flat {order.flat_number}</small></span><strong>{money(Number(order.amount))}</strong><p>{order.order_details}</p></div>
+        <div className="delivery-confirm-note"><ShieldCheck /><span><b>{order.photo_path ? "Temporary photo will be removed" : "Ready to complete"}</b><small>{order.photo_path ? "The private order photo is deleted and verified before the status changes. The order record and totals remain available under Delivered." : "The order record and totals remain available under Delivered. You can move it back to Orders later if needed."}</small></span></div>
+        <div className="delivery-confirm-actions"><button type="button" className="cancel" onClick={onClose} disabled={busy}>Keep in Orders</button><button type="button" className="confirm-delivery" onClick={onConfirm} disabled={busy}><Check size={18} /> {busy ? "Completing safely…" : "Mark delivered"}</button></div>
+      </section>
     </div>
   );
 }

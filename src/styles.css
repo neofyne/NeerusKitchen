@@ -603,6 +603,29 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .delete-order-actions .cancel { color: #657169; border: 1px solid #d9e0dc; }
 .confirm-delete { color: #fff; background: #ad4439; }
 .confirm-delete:disabled, .delete-order-actions .cancel:disabled { opacity: .58; }
+.delivery-confirm-bg { z-index: 64; }
+.delivery-confirm-modal { width: min(480px, 100%); padding: 24px; }
+.delivery-confirm-head { display: grid; grid-template-columns: 46px minmax(0, 1fr) 44px; align-items: center; gap: 12px; }
+.delivery-confirm-head h2 { margin: 2px 0 0; font-size: 25px; letter-spacing: -.035em; }
+.delivery-confirm-head .icon-button { width: 44px; height: 44px; }
+.delivery-confirm-icon { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 13px; color: #247550; background: #e8f6ee; }
+.delivery-confirm-icon svg { width: 22px; }
+.delivery-confirm-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; margin-top: 20px; padding: 14px; border: 1px solid #e0e5e2; border-radius: 12px; background: #fafbf9; }
+.delivery-confirm-summary b, .delivery-confirm-summary small { display: block; }
+.delivery-confirm-summary b { font-size: 14px; }
+.delivery-confirm-summary small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.delivery-confirm-summary strong { font-size: 15px; }
+.delivery-confirm-summary p { grid-column: 1 / -1; margin: 7px 0 0; color: #46534b; font-size: 11px; font-weight: 720; line-height: 1.4; }
+.delivery-confirm-note { display: flex; align-items: flex-start; gap: 10px; margin-top: 14px; padding: 12px; border: 1px solid #cbe3d5; border-radius: 11px; color: #216c49; background: #f1faf5; }
+.delivery-confirm-note > svg { width: 18px; height: 18px; flex: 0 0 18px; }
+.delivery-confirm-note b, .delivery-confirm-note small { display: block; }
+.delivery-confirm-note b { font-size: 11px; }
+.delivery-confirm-note small { margin-top: 3px; color: #5d7165; font-size: 10px; line-height: 1.45; }
+.delivery-confirm-actions { display: grid; grid-template-columns: 1fr 1.35fr; gap: 9px; margin-top: 18px; }
+.delivery-confirm-actions button { min-height: 45px; display: flex; align-items: center; justify-content: center; gap: 6px; border-radius: 10px; font-weight: 820; }
+.delivery-confirm-actions .cancel { color: #657169; border: 1px solid #d9e0dc; }
+.confirm-delivery { color: #fff; background: #27815a; }
+.confirm-delivery:disabled, .delivery-confirm-actions .cancel:disabled { opacity: .58; }
 
 .mobile-nav { display: none; }
 .device-switch { position: fixed; z-index: 100; right: 22px; bottom: 22px; min-height: 44px; display: none; align-items: center; gap: 8px; padding: 0 15px; border-radius: 12px; color: #fff; background: #17211b; box-shadow: 0 10px 28px rgba(12, 20, 15, .25); font-size: 13px; font-weight: 800; }
@@ -836,6 +859,11 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .delete-order-icon { width: 42px; height: 42px; }
   .delete-order-head h2 { font-size: 22px; }
   .delete-order-actions { grid-template-columns: 1fr 1.25fr; }
+  .delivery-confirm-modal { padding: 22px 16px calc(20px + env(safe-area-inset-bottom)); }
+  .delivery-confirm-head { grid-template-columns: 42px minmax(0, 1fr) 42px; gap: 10px; }
+  .delivery-confirm-icon { width: 42px; height: 42px; }
+  .delivery-confirm-head h2 { font-size: 22px; }
+  .delivery-confirm-actions { grid-template-columns: 1fr 1.25fr; }
   .login-card { padding: 29px 22px; }
 }
 
@@ -947,6 +975,13 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dark .delete-order-warning small { color: #d8b7ab; }
 .dark .delete-order-actions .cancel { color: #c1cac4; border-color: #3a453e; }
 .dark .confirm-delete { background: #a63f35; }
+.dark .delivery-confirm-icon { color: #8ed9ad; background: #173021; }
+.dark .delivery-confirm-summary { color: var(--ink); border-color: #39443d; background: #121914; }
+.dark .delivery-confirm-summary p { color: #d3dbd6; }
+.dark .delivery-confirm-note { color: #8ed9ad; border-color: #38674d; background: #173021; }
+.dark .delivery-confirm-note small { color: #b8c9bf; }
+.dark .delivery-confirm-actions .cancel { color: #c1cac4; border-color: #3a453e; }
+.dark .confirm-delivery { background: #23734f; }
 .dark .settings-icon { color: #ffab8c; background: #382118; }
 .dark .info-popout-trigger { color: #aab5ae; border-color: #39443d; background: #121914; }
 .dark .info-popout-trigger:hover, .dark .info-popout-trigger:focus-visible, .dark .info-popout.open .info-popout-trigger { color: #8ed9ad; border-color: #38674d; background: #173021; }
