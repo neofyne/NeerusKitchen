@@ -13,6 +13,7 @@ import {
   ChevronRight,
   CircleUserRound,
   Clock3,
+  DatabaseBackup,
   Download,
   ExternalLink,
   FileSpreadsheet,
@@ -30,6 +31,7 @@ import {
   QrCode,
   ReceiptText,
   RotateCcw,
+  ArchiveRestore,
   Save,
   Search,
   Share2,
@@ -130,6 +132,37 @@ type AdminStoreSettings = {
 };
 type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
 type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
+type PortableBackup = {
+  format: "neerus-home-kitchen-backup";
+  version: 1;
+  created_at: string;
+  app_name: string;
+  counts: {
+    orders: number;
+    order_items: number;
+    menu_items: number;
+    daily_menu: number;
+    customer_profiles: number;
+    restored_customer_profiles: number;
+  };
+  data: Record<string, unknown[]>;
+};
+type PortableRestoreResult = {
+  orders: number;
+  order_items: number;
+  menu_items: number;
+  daily_menu: number;
+  customers_matched: number;
+  customers_waiting_to_reconnect: number;
+};
+
+function isPortableBackup(value: unknown): value is PortableBackup {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<PortableBackup>;
+  if (candidate.format !== "neerus-home-kitchen-backup" || candidate.version !== 1) return false;
+  if (!candidate.counts || !candidate.data || typeof candidate.created_at !== "string") return false;
+  return ["orders", "menu_items", "customer_profiles"].every((key) => Array.isArray(candidate.data?.[key]));
+}
 
 const stages: { key: Stage; label: string; badge: string; short: string; color: string }[] = [
   { key: "new", label: "Orders", badge: "Order", short: "Orders", color: "blue" },
@@ -182,7 +215,8 @@ async function shareOrSaveFile(file: File) {
   };
   if (pickerWindow.showSaveFilePicker) {
     const extension = `.${file.name.split(".").pop()}`;
-    const handle = await pickerWindow.showSaveFilePicker({ suggestedName: file.name, types: [{ description: extension === ".xlsx" ? "Excel workbook" : "CSV file", accept: { [file.type]: [extension] } }] });
+    const description = extension === ".xlsx" ? "Excel workbook" : extension === ".json" ? "Neeru's Kitchen backup" : extension === ".sql" ? "Supabase setup SQL" : "CSV file";
+    const handle = await pickerWindow.showSaveFilePicker({ suggestedName: file.name, types: [{ description, accept: { [file.type]: [extension] } }] });
     const writable = await handle.createWritable();
     await writable.write(file);
     await writable.close();
@@ -728,6 +762,39 @@ export function AdminApp() {
     return new File([blob], `${baseName}.xlsx`, { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   }
 
+  async function createPortableBackup(): Promise<File> {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const { data, error } = await supabase.rpc("create_portable_backup");
+    if (error) {
+      if (/function .* does not exist|schema cache/i.test(error.message)) {
+        throw new Error("Backup support has not been installed in this Supabase project yet.");
+      }
+      throw new Error(`Could not create backup: ${error.message}`);
+    }
+    if (!isPortableBackup(data)) throw new Error("Supabase returned an invalid backup package.");
+    const stamp = new Date(data.created_at).toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    return new File(
+      [JSON.stringify(data, null, 2)],
+      `neerus-home-kitchen-full-backup-${stamp}.json`,
+      { type: "application/json" },
+    );
+  }
+
+  async function restorePortableBackup(backup: PortableBackup): Promise<PortableRestoreResult> {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const { data, error } = await supabase.rpc("restore_portable_backup", { p_backup: backup, p_mode: "replace" });
+    if (error) {
+      if (/function .* does not exist|schema cache/i.test(error.message)) {
+        throw new Error("Restore support is not installed. Run the new-project setup SQL in Supabase first.");
+      }
+      throw new Error(`Restore failed safely: ${error.message}`);
+    }
+    const result = data as PortableRestoreResult | null;
+    if (!result || typeof result.orders !== "number") throw new Error("Supabase did not confirm the restored records.");
+    await Promise.all([loadOrders(), loadMenu(), loadCustomers(), loadActionCenter(false)]);
+    return result;
+  }
+
   async function deletePhotoKeys(keys: string[]) {
     if (!session || keys.length === 0) return 0;
     const response = await fetch(photoApiUrl(), {
@@ -1251,6 +1318,8 @@ export function AdminApp() {
               onLarge={setLarge}
               onDark={setDark}
               onPrepareExport={prepareOrdersExport}
+              onCreateBackup={createPortableBackup}
+              onRestoreBackup={restorePortableBackup}
               onLoadStorage={loadStorageSummary}
               onCleanup={cleanupData}
               onSavePayment={savePaymentSettings}
@@ -1587,7 +1656,7 @@ function InfoTip({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, whatsappNumber, onLarge, onDark, onPrepareExport, onCreateBackup, onRestoreBackup, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
@@ -1598,6 +1667,8 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   onLarge: (large: boolean) => void;
   onDark: (dark: boolean) => void;
   onPrepareExport: (options: ExportOptions, format: ExportFormat) => Promise<File>;
+  onCreateBackup: () => Promise<File>;
+  onRestoreBackup: (backup: PortableBackup) => Promise<PortableRestoreResult>;
   onLoadStorage: () => Promise<StorageSummary>;
   onCleanup: (action: CleanupAction) => Promise<string>;
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
@@ -1628,6 +1699,13 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   const [preparedFile, setPreparedFile] = useState<File | null>(null);
   const [exportMessage, setExportMessage] = useState("");
   const [exportError, setExportError] = useState(false);
+  const [backupBusy, setBackupBusy] = useState<"create" | "restore" | "">("");
+  const [preparedBackup, setPreparedBackup] = useState<File | null>(null);
+  const [selectedBackup, setSelectedBackup] = useState<PortableBackup | null>(null);
+  const [selectedBackupName, setSelectedBackupName] = useState("");
+  const [restoreApproved, setRestoreApproved] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
+  const [backupError, setBackupError] = useState(false);
   const [storageSummary, setStorageSummary] = useState<StorageSummary | null>(null);
   const [storageBusy, setStorageBusy] = useState<CleanupAction | "refresh" | "">("");
   const [storageMessage, setStorageMessage] = useState("");
@@ -1736,6 +1814,76 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
       setStorageMessage(error instanceof Error ? error.message : "Cleanup could not be completed.");
     } finally {
       setStorageBusy("");
+    }
+  }
+
+  async function prepareFullBackup() {
+    setBackupBusy("create");
+    setBackupError(false);
+    setBackupMessage("");
+    try {
+      const file = await onCreateBackup();
+      setPreparedBackup(file);
+      setBackupMessage("Portable backup ready. Save it somewhere outside Supabase.");
+    } catch (error) {
+      setBackupError(true);
+      setBackupMessage(error instanceof Error ? error.message : "Could not prepare the backup.");
+    } finally {
+      setBackupBusy("");
+    }
+  }
+
+  async function saveFullBackup() {
+    if (!preparedBackup) return;
+    setBackupError(false);
+    try {
+      setBackupMessage(await shareOrSaveFile(preparedBackup));
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setBackupError(true);
+      setBackupMessage(error instanceof Error ? error.message : "Could not share or save the backup.");
+    }
+  }
+
+  async function chooseBackup(file?: File) {
+    setSelectedBackup(null);
+    setSelectedBackupName("");
+    setRestoreApproved(false);
+    setBackupError(false);
+    setBackupMessage("");
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setBackupError(true);
+      return setBackupMessage("This backup is over the 25 MB safety limit.");
+    }
+    try {
+      const parsed = JSON.parse(await file.text()) as unknown;
+      if (!isPortableBackup(parsed)) throw new Error("Choose a valid Neeru's Home Kitchen .json backup.");
+      setSelectedBackup(parsed);
+      setSelectedBackupName(file.name);
+      setBackupMessage("Backup checked and ready for review.");
+    } catch (error) {
+      setBackupError(true);
+      setBackupMessage(error instanceof Error ? error.message : "The selected file could not be read.");
+    }
+  }
+
+  async function restoreFullBackup() {
+    if (!selectedBackup || !restoreApproved) return;
+    setBackupBusy("restore");
+    setBackupError(false);
+    setBackupMessage("");
+    try {
+      const result = await onRestoreBackup(selectedBackup);
+      setBackupMessage(`Restore complete: ${result.orders} orders, ${result.menu_items} dishes and ${result.customers_matched} connected customers. ${result.customers_waiting_to_reconnect} customer account${result.customers_waiting_to_reconnect === 1 ? "" : "s"} can reconnect with the same phone or email.`);
+      setSelectedBackup(null);
+      setSelectedBackupName("");
+      setRestoreApproved(false);
+    } catch (error) {
+      setBackupError(true);
+      setBackupMessage(error instanceof Error ? error.message : "The backup could not be restored.");
+    } finally {
+      setBackupBusy("");
     }
   }
 
@@ -1899,6 +2047,32 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
           </div>
           {preparedFile && <div className="prepared-export"><span><b>{preparedFile.name}</b><small>{readableBytes(preparedFile.size)} · ready on this device</small></span><button className="primary" onClick={sharePrepared}><Share2 size={18} /> Share or save</button></div>}
           {exportMessage && <p className={`settings-message ${exportError ? "error" : "success"}`} role="status">{exportMessage}</p>}
+        </article>
+
+        <article className="settings-card export-card migration-card">
+          <div className="settings-title"><span className="settings-icon"><DatabaseBackup /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Full backup &amp; restore</h2><InfoTip label="About portable backups">Creates a portable JSON package containing orders, order items, customer profiles, menu, daily availability, promotions, UPI and storefront settings. Supabase never exposes passwords, so customers reconnect securely with the same phone or email. Photo files remain in this Netlify site; their database references are included.</InfoTip></span></div></div>
+          <div className="migration-sections">
+            <section className="migration-section">
+              <span className="migration-label"><b>1. Protect this kitchen</b><em>Non-destructive</em></span>
+              <div className="migration-actions">
+                <button className="primary" disabled={Boolean(backupBusy)} onClick={prepareFullBackup}><DatabaseBackup size={18} /> {backupBusy === "create" ? "Creating backup…" : "Create full backup"}</button>
+                <a className="secondary setup-sql-link" href="/supabase-new-project-setup.sql" download="neerus-home-kitchen-supabase-setup.sql"><Download size={17} /> New-project setup SQL</a>
+              </div>
+              {preparedBackup && <div className="prepared-export"><span><b>{preparedBackup.name}</b><small>{readableBytes(preparedBackup.size)} · JSON migration package</small></span><button className="primary" onClick={saveFullBackup}><Share2 size={18} /> Share or save</button></div>}
+            </section>
+
+            <section className="migration-section restore-section">
+              <span className="migration-label"><b>2. Restore a backup</b><em>Replaces records</em></span>
+              <label className="backup-file-picker"><Upload size={18} /><span><b>{selectedBackupName || "Choose backup file"}</b><small>Neeru's Kitchen JSON only</small></span><input type="file" accept="application/json,.json" onChange={(event) => { void chooseBackup(event.target.files?.[0]); event.currentTarget.value = ""; }} /></label>
+              {selectedBackup && <div className="backup-review">
+                <div className="backup-counts"><span><b>{selectedBackup.counts.orders}</b><small>Orders</small></span><span><b>{selectedBackup.counts.menu_items}</b><small>Dishes</small></span><span><b>{selectedBackup.counts.customer_profiles + selectedBackup.counts.restored_customer_profiles}</b><small>Customers</small></span></div>
+                <small className="backup-date">Created {new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(selectedBackup.created_at))}</small>
+                <label className="restore-consent"><input type="checkbox" checked={restoreApproved} onChange={(event) => setRestoreApproved(event.target.checked)} /><span>I understand this replaces the current orders, menu and daily selling records.</span></label>
+                <button className="restore-backup-button" disabled={!restoreApproved || Boolean(backupBusy)} onClick={restoreFullBackup}><ArchiveRestore size={18} /> {backupBusy === "restore" ? "Restoring safely…" : "Restore this backup"}</button>
+              </div>}
+            </section>
+          </div>
+          {backupMessage && <p className={`settings-message ${backupError ? "error" : "success"}`} role="status">{backupMessage}</p>}
         </article>
 
         <article className="settings-card storage-card">

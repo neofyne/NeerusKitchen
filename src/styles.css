@@ -443,6 +443,33 @@ img { display: block; max-width: 100%; }
 .prepared-export b { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .prepared-export small { margin-top: 3px; color: var(--muted); font-size: 9px; }
 .prepared-export button { min-height: 38px; flex: 0 0 auto; padding: 0 12px; font-size: 10px; }
+.migration-sections { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; margin-top: 19px; }
+.migration-section { min-width: 0; padding: 13px; border: 1px solid #dce3df; border-radius: 12px; background: #fafbf9; }
+.migration-label { display: flex; align-items: center; gap: 7px; margin-bottom: 11px; }
+.migration-label b { font-size: 11px; }
+.migration-label em { margin-left: auto; padding: 4px 7px; border-radius: 999px; color: #27734e; background: #e9f6ee; font-size: 7px; font-style: normal; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
+.restore-section .migration-label em { color: #9d4b31; background: #ffebe4; }
+.migration-actions { display: grid; grid-template-columns: 1fr; gap: 7px; }
+.migration-actions > button, .setup-sql-link { min-height: 41px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 0 10px; border-radius: 9px; font-size: 9px; font-weight: 820; text-decoration: none; }
+.setup-sql-link { border: 1px solid #d7dfda; color: #536058; background: #fff; }
+.backup-file-picker { min-height: 52px; display: flex; align-items: center; gap: 10px; padding: 9px 11px; border: 1px dashed #bfcac3; border-radius: 10px; color: #536159; background: #fff; cursor: pointer; }
+.backup-file-picker > svg { flex: 0 0 auto; color: var(--brand); }
+.backup-file-picker span { min-width: 0; }
+.backup-file-picker b, .backup-file-picker small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.backup-file-picker b { font-size: 10px; }
+.backup-file-picker small { margin-top: 2px; color: var(--muted); font-size: 8px; }
+.backup-file-picker input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.backup-review { margin-top: 10px; padding: 10px; border: 1px solid #efd4c9; border-radius: 10px; background: #fff8f5; }
+.backup-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.backup-counts span { min-width: 0; padding: 7px; border-radius: 8px; background: #fff; text-align: center; }
+.backup-counts b, .backup-counts small { display: block; }
+.backup-counts b { font-size: 13px; }
+.backup-counts small { margin-top: 1px; color: var(--muted); font-size: 7px; text-transform: uppercase; }
+.backup-date { display: block; margin-top: 7px; color: var(--muted); font-size: 8px; text-align: center; }
+.restore-consent { display: grid; grid-template-columns: 17px 1fr; align-items: start; gap: 8px; margin-top: 10px; color: #674b42; font-size: 9px; font-weight: 690; line-height: 1.4; cursor: pointer; }
+.restore-consent input { width: 17px; height: 17px; accent-color: var(--brand); }
+.restore-backup-button { width: 100%; min-height: 41px; display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 10px; border-radius: 9px; color: #fff; background: #a9472b; font-size: 9px; font-weight: 850; }
+.restore-backup-button:disabled { opacity: .46; }
 .storage-cleanup-card .settings-title { align-items: center; }
 .storage-refresh { min-height: 34px; display: flex; align-items: center; gap: 5px; margin-left: auto; padding: 0 9px; border: 1px solid #d7dfda; border-radius: 8px; color: #57645c; background: #fff; font-size: 9px; font-weight: 820; }
 .storage-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; margin-top: 19px; }
@@ -824,6 +851,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .payment-filter { grid-column: 1 / -1; }
   .export-button { width: 100%; }
   .export-actions, .cleanup-groups { grid-template-columns: 1fr; }
+  .migration-sections { grid-template-columns: 1fr; }
   .prepared-export { align-items: stretch; flex-direction: column; }
   .prepared-export button { width: 100%; justify-content: center; }
   .storage-cleanup-card .settings-title { align-items: flex-start; flex-wrap: wrap; }
@@ -1007,6 +1035,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .dark .settings-message.success { color: #8ed9ad; background: #173021; }
 .dark .settings-message.error { color: #ffad91; background: #382118; }
 .dark .prepared-export, .dark .storage-summary > span, .dark .cleanup-groups section, .dark .storage-refresh, .dark .cleanup-groups button { color: var(--ink); border-color: #3a453e; background: #121914; }
+.dark .migration-section, .dark .backup-file-picker, .dark .setup-sql-link, .dark .backup-counts span { color: var(--ink); border-color: #3a453e; background: #121914; }
+.dark .backup-review { color: var(--ink); border-color: #694233; background: #241914; }
+.dark .restore-consent { color: #e2c5ba; }
 .dark .danger-cleanup { border-color: #694233 !important; background: #241914; }
 .dark .danger-cleanup button { color: #ffad91; border-color: #694233; background: #171f1a; }
 .dark .qr-uploader { border-color: #334139; background: #141c17; }
