@@ -2,11 +2,15 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+const hasValidSupabaseConfig =
+  /^https?:\/\/[^*\s]+$/i.test(supabaseUrl || "") &&
+  Boolean(supabaseKey) &&
+  !supabaseKey.includes("*");
 
 const isAdminRoute = window.location.pathname.startsWith("/admin");
 
 export const supabase =
-  supabaseUrl && supabaseKey
+  hasValidSupabaseConfig
     ? createClient(supabaseUrl, supabaseKey, {
         auth: {
           // Keep the private order desk signed in independently from the
@@ -21,7 +25,7 @@ export const supabase =
     : null;
 
 export const storefrontSupabase =
-  supabaseUrl && supabaseKey
+  hasValidSupabaseConfig
     ? createClient(supabaseUrl, supabaseKey, {
         auth: {
           // Keep customers signed in on this phone after the first successful
