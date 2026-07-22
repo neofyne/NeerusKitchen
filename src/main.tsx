@@ -220,7 +220,7 @@ export function AdminApp() {
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Kitchen", order_cutoff: "", whatsapp_number: "918483000013" });
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Home Kitchen", order_cutoff: "", whatsapp_number: "918483000013" });
 
   useEffect(() => {
     if (!supabase) return;
@@ -684,7 +684,7 @@ export function AdminApp() {
             <button className="brand" onClick={() => openScreen("orders")} aria-label="Open orders">
               <LogoMark />
               <span className="brand-copy">
-                <strong>Neeru’s Kitchen</strong>
+                <strong>Neeru’s Home Kitchen</strong>
                 <small>HOME KITCHEN · ORDER DESK</small>
               </span>
             </button>
@@ -850,7 +850,7 @@ function Login({ dark }: { dark: boolean }) {
       <section className="login-card">
         <LogoMark />
         <p className="eyebrow">PRIVATE FAMILY APP</p>
-        <h1>Neeru’s Kitchen</h1>
+        <h1>Neeru’s Home Kitchen</h1>
         <p>One secure place for the family to manage daily kitchen orders.</p>
         <form onSubmit={signIn}>
           <label>Email address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" required /></label>
@@ -993,7 +993,7 @@ function MenuScreen({ items, settings, onSaveSettings, onDaily, onAdd, onEdit, o
   useEffect(() => setForm(settings), [settings]);
   useEffect(() => {
     if (!form.upi_id.trim()) return setUpiQr("");
-    const uri = `upi://pay?pa=${encodeURIComponent(form.upi_id.trim())}&pn=${encodeURIComponent(form.merchant_name || "Neeru's Kitchen")}&cu=INR&tn=${encodeURIComponent("Neeru's Kitchen payment preview")}`;
+    const uri = `upi://pay?pa=${encodeURIComponent(form.upi_id.trim())}&pn=${encodeURIComponent(form.merchant_name || "Neeru's Home Kitchen")}&cu=INR&tn=${encodeURIComponent("Neeru's Home Kitchen payment preview")}`;
     QRCode.toDataURL(uri, { width: 180, margin: 1, color: { dark: "#17211b", light: "#ffffff" } }).then(setUpiQr);
   }, [form.upi_id, form.merchant_name]);
   const set = <K extends keyof AdminStoreSettings>(key: K, value: AdminStoreSettings[K]) => setForm((current) => ({ ...current, [key]: value }));
@@ -1244,7 +1244,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, accessReques
           <form className="settings-form payment-settings-form" onSubmit={savePayment}>
             <div className="payment-settings-fields">
               <label><span>UPI ID</span><input value={paymentForm.upi_id} onChange={(event) => setPaymentForm((current) => ({ ...current, upi_id: event.target.value }))} placeholder="name@bank" inputMode="email" aria-invalid={paymentForm.upi_id.length > 0 && !upiLooksValid} required />{paymentForm.upi_id.length > 0 && !upiLooksValid && <small className="field-hint error">Use a UPI ID such as krsnasolo@okicici</small>}</label>
-              <label><span>Payee name</span><input value={paymentForm.merchant_name} onChange={(event) => setPaymentForm((current) => ({ ...current, merchant_name: event.target.value }))} placeholder="Neeru's Kitchen" required /></label>
+              <label><span>Payee name</span><input value={paymentForm.merchant_name} onChange={(event) => setPaymentForm((current) => ({ ...current, merchant_name: event.target.value }))} placeholder="Neeru's Home Kitchen" required /></label>
             </div>
             <div className="qr-uploader">
               <div className="qr-preview-box">
@@ -1471,7 +1471,7 @@ function Choice({ label, options, value, onChange }: { label: string; options: s
 
 function Root() {
   const isAdmin = window.location.pathname.startsWith("/admin");
-  document.title = isAdmin ? "Neeru’s Kitchen · Family Order Desk" : "Neeru’s Kitchen · Vegetarian Home Kitchen";
+  document.title = isAdmin ? "Neeru’s Home Kitchen · Family Order Desk" : "Neeru’s Home Kitchen · Vegetarian Meals";
   return isAdmin ? <AdminApp /> : <Storefront />;
 }
 

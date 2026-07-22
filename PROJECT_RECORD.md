@@ -1,8 +1,8 @@
-# Neeru's Kitchen — Project Record
+# Neeru's Home Kitchen — Project Record
 
 Last updated: 22 July 2026
 
-This file records the accounts and services used to operate the Neeru's Kitchen family order manager. It intentionally contains no passwords, API keys, recovery codes, or other secrets.
+This file records the accounts and services used to operate the Neeru's Home Kitchen family order manager. It intentionally contains no passwords, API keys, recovery codes, or other secrets.
 
 ## GitHub
 

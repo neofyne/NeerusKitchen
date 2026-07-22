@@ -90,7 +90,7 @@ create table if not exists public.storefront_settings (
   ordering_open boolean not null default true,
   hero_message text not null default 'Fresh home-style food, prepared with care and delivered to your door.',
   upi_id text not null default 'krsnasolo@okicici',
-  merchant_name text not null default 'Neeru''s Kitchen',
+  merchant_name text not null default 'Neeru''s Home Kitchen',
   order_cutoff time,
   updated_at timestamptz not null default now()
 );

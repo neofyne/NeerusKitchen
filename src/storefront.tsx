@@ -109,7 +109,7 @@ const defaultSettings: StoreSettings = {
   ordering_open: true,
   hero_message: "Fresh home-style food, prepared with care and delivered to your door.",
   upi_id: "krsnasolo@okicici",
-  merchant_name: "Neeru's Kitchen",
+  merchant_name: "Neeru's Home Kitchen",
   order_cutoff: null,
   whatsapp_number: "918483000013",
 };
@@ -223,7 +223,7 @@ export function Storefront() {
     if (!data) return;
     const next = data as Profile;
     if (next.access_status !== "approved") {
-      setNotice(next.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Kitchen." : "Your account is waiting for kitchen approval.");
+      setNotice(next.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Home Kitchen." : "Your account is waiting for kitchen approval.");
       await supabase.auth.signOut();
       return;
     }
@@ -252,7 +252,7 @@ export function Storefront() {
     ? `+91 ${whatsappNumber.slice(2, 7)} ${whatsappNumber.slice(7)}`
     : whatsappNumber ? `+${whatsappNumber}` : "";
   const whatsappHref = whatsappNumber
-    ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hi Neeru's Kitchen, I have a question about today's menu or my order.")}`
+    ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hi Neeru's Home Kitchen, I have a question about today's menu or my order.")}`
     : "";
 
   function setQuantity(id: string, quantity: number) {
@@ -284,9 +284,9 @@ export function Storefront() {
       </button>
       <div className="storefront">
       <header className="store-header">
-        <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
+        <button className="store-brand" onClick={() => go("menu")}><StoreLogo /><span><strong>Neeru’s Home Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></button>
         <div className="store-header-actions">
-          {whatsappHref && <a className="store-contact-link" href={whatsappHref} target="_blank" rel="noreferrer" aria-label={`Contact Neeru's Kitchen on WhatsApp ${whatsappDisplay}`}><MessageCircle /><span>WhatsApp</span></a>}
+          {whatsappHref && <a className="store-contact-link" href={whatsappHref} target="_blank" rel="noreferrer" aria-label={`Contact Neeru's Home Kitchen on WhatsApp ${whatsappDisplay}`}><MessageCircle /><span>WhatsApp</span></a>}
           <a className="family-link" href="/admin">Family desk</a>
           <button className={`header-cart-button ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")} aria-label={cartCount ? `Cart, ${cartCount} items, ${formatMoney(cartTotal)}` : "Cart, empty"}>
             <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
@@ -325,10 +325,10 @@ export function Storefront() {
         <button className={`cart-nav ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")}><span className="cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span><span>Cart</span></button>
       </nav>
 
-      {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Kitchen."); }} />}
+      {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Home Kitchen."); }} />}
       {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); loadOrders(); }} />}
       {placedOrder && <PaymentModal order={placedOrder} settings={settings} onClose={() => { setPlacedOrder(null); go("orders"); }} />}
-      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>WhatsApp us</b><small>{whatsappDisplay}</small></span></a>}
+      {whatsappHref && <a className="store-whatsapp" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Home Kitchen on WhatsApp" title={`WhatsApp ${whatsappDisplay}`}><MessageCircle /><span><b>WhatsApp us</b><small>{whatsappDisplay}</small></span></a>}
       </div>
     </div>
   );
@@ -351,7 +351,7 @@ function CartView({ lines, total, orderingOpen, onQuantity, onBack, onCheckout }
 }
 
 function OrdersView({ orders, onBack }: { orders: CustomerOrder[]; onBack: () => void }) {
-  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>Follow every meal from Neeru’s kitchen to your door.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${order.stage}`}><i />{stageLabels[order.stage] || order.stage}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>)}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
+  return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">ORDER HISTORY</span><h1>My orders</h1><p>Follow every meal from Neeru’s Home Kitchen to your door.</p></div>{orders.length ? <div className="customer-orders">{orders.map((order) => <article key={order.id}><div className="customer-order-head"><span><b>#{order.id.slice(0, 8).toUpperCase()}</b><small>{new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(order.created_at))}</small></span><strong>{formatMoney(Number(order.amount))}</strong></div><p>{order.order_details}</p><div className="customer-order-status"><span className={`order-stage ${order.stage}`}><i />{stageLabels[order.stage] || order.stage}</span><span className={`payment-state ${order.payment_status}`}>{order.payment_status === "verified" ? <Check /> : <Clock3 />}{order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending"}</span></div></article>)}</div> : <div className="store-empty"><ReceiptText /><b>No orders yet</b><span>Your first home-cooked meal will appear here.</span><button onClick={onBack}>Explore the menu</button></div>}</section>;
 }
 
 function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
@@ -407,7 +407,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         if (accessError || access?.access_status !== "approved") {
           await supabase.auth.signOut();
           setBusy(false);
-          return setMessage(access?.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Kitchen." : "Your request is waiting for kitchen approval. Please try again after the family confirms it.");
+          return setMessage(access?.access_status === "rejected" ? "This access request was declined. Please contact Neeru’s Home Kitchen." : "Your request is waiting for kitchen approval. Please try again after the family confirms it.");
         }
         setBusy(false);
         onSuccess();
@@ -426,7 +426,7 @@ function CustomerAuth({ onClose, onSuccess }: { onClose: () => void; onSuccess: 
         return setMessage(error.message);
       }
       setMessageIsSuccess(true);
-      setMessage("Request sent to Neeru’s Kitchen. A family admin will approve your account, then you can sign in with this number and PIN.");
+      setMessage("Request sent to Neeru’s Home Kitchen. A family admin will approve your account, then you can sign in with this number and PIN.");
       return;
     }
 
@@ -573,7 +573,7 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
   const [reference, setReference] = useState("");
   const [message, setMessage] = useState("");
   const [copyMessage, setCopyMessage] = useState("");
-  const note = `Neeru order ${order.id.slice(0, 8).toUpperCase()}`;
+  const note = `Neeru's Home Kitchen order ${order.id.slice(0, 8).toUpperCase()}`;
   const paymentQuery = settings.upi_id ? new URLSearchParams({ pa: settings.upi_id, pn: settings.merchant_name, am: Number(order.amount).toFixed(2), cu: "INR", tn: note }).toString() : "";
   const paymentUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
   const isAndroid = /Android/i.test(navigator.userAgent);
@@ -637,7 +637,7 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
         <span className="payment-success"><Check /></span>
         <span className="store-eyebrow">ORDER RECEIVED</span>
         <h2>Thank you!</h2>
-        <p>Order <b>#{order.id.slice(0, 8).toUpperCase()}</b> has been sent to Neeru’s Kitchen.</p>
+        <p>Order <b>#{order.id.slice(0, 8).toUpperCase()}</b> has been sent to Neeru’s Home Kitchen.</p>
         <div className="payment-total"><span>Amount to pay</span><strong>{formatMoney(Number(order.amount))}</strong></div>
         {paymentUri ? (
           <>
@@ -645,7 +645,7 @@ function PaymentModal({ order, settings, onClose }: { order: CustomerOrder; sett
               {qr ? <img src={qr} alt="UPI payment QR" /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}
               <div>
                 <b>Pay with any UPI app</b>
-                <small>{qrKind === "custom" ? "Scan Neeru’s Kitchen QR from another screen, or choose your payment app below." : "Scan from another screen, or choose your payment app below."}</small>
+                <small>{qrKind === "custom" ? "Scan Neeru’s Home Kitchen QR from another screen, or choose your payment app below." : "Scan from another screen, or choose your payment app below."}</small>
                 <div className="upi-app-actions">
                   <a className="gpay-action" href={googlePayUri}>Google Pay</a>
                   {paytmUri && <a className="paytm-action" href={paytmUri}>Paytm</a>}

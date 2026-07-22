@@ -264,8 +264,8 @@
   .store-brand { gap: 9px; }
   .store-logo { width: 39px; height: 39px; flex-basis: 39px; border-radius: 12px; }
   .store-logo svg { width: 28px; }
-  .store-brand strong { font-size: 17px; }
-  .store-brand small { font-size: 6.2px; letter-spacing: .08em; }
+  .store-brand strong { font-size: 16px; line-height: 1.02; }
+  .store-brand small { font-size: 5.8px; letter-spacing: .065em; white-space: nowrap; }
   .family-link { display: none; }
   .store-header-actions { gap: 6px; }
   .store-contact-link { width: 42px; min-height: 42px; justify-content: center; padding: 0; border-radius: 13px; box-shadow: 0 7px 18px rgba(29,143,80,.3), inset 0 0 0 1px rgba(255,255,255,.16); }
@@ -275,8 +275,8 @@
   .header-cart-copy { display: none; }
   .account-button { width: 40px; min-width: 40px; height: 40px; padding: 0; border-radius: 12px; }
   .account-button span { display: none; }
-  .account-button.sign-in { width: auto; padding: 0 9px; }
-  .account-button.sign-in span { display: inline; }
+  .account-button.sign-in { width: 40px; padding: 0; }
+  .account-button.sign-in span { display: none; }
   .store-main { width: 100%; padding: 0 14px 118px; overflow-x: clip; }
   .store-hero { min-height: 0; grid-template-columns: 1fr; gap: 28px; padding: 31px 0 35px; }
   .hero-copy h1 { margin: 10px 0 15px; font-size: clamp(43px, 13.5vw, 57px); }

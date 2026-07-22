@@ -21,6 +21,19 @@ func writeJPEG(_ image: NSImage, name: String, quality: CGFloat = 0.82) throws {
   try jpeg.write(to: outputDirectory.appendingPathComponent(name))
 }
 
+func resizeAsset(_ name: String, width: Int, height: Int) throws {
+  let process = Process()
+  process.executableURL = URL(fileURLWithPath: "/usr/bin/sips")
+  process.arguments = ["-z", String(height), String(width), outputDirectory.appendingPathComponent(name).path]
+  process.standardOutput = FileHandle.nullDevice
+  process.standardError = FileHandle.nullDevice
+  try process.run()
+  process.waitUntilExit()
+  guard process.terminationStatus == 0 else {
+    throw NSError(domain: "NeerusKitchenAssets", code: 3)
+  }
+}
+
 func drawLogo(in rect: NSRect) {
   NSColor(calibratedRed: 0.93, green: 0.32, blue: 0.13, alpha: 1).setFill()
   NSBezierPath(roundedRect: rect, xRadius: rect.width * 0.24, yRadius: rect.width * 0.24).fill()
@@ -89,7 +102,7 @@ drawLogo(in: NSRect(x: 68, y: 474, width: 92, height: 92))
 let ink = NSColor(calibratedRed: 0.08, green: 0.13, blue: 0.10, alpha: 1)
 let muted = NSColor(calibratedRed: 0.36, green: 0.42, blue: 0.38, alpha: 1)
 let orange = NSColor(calibratedRed: 0.79, green: 0.24, blue: 0.08, alpha: 1)
-drawText("Neeru’s Kitchen", at: NSPoint(x: 186, y: 520), font: .systemFont(ofSize: 38, weight: .heavy), color: ink)
+drawText("Neeru’s Home Kitchen", at: NSPoint(x: 186, y: 520), font: .systemFont(ofSize: 35, weight: .heavy), color: ink)
 drawText("100% VEGETARIAN · HOME-COOKED", at: NSPoint(x: 188, y: 487), font: .systemFont(ofSize: 14, weight: .bold), color: muted, tracking: 1.3)
 drawText("Fresh food.", at: NSPoint(x: 68, y: 326), font: .systemFont(ofSize: 66, weight: .heavy), color: ink)
 drawText("Feels like home.", at: NSPoint(x: 68, y: 247), font: .systemFont(ofSize: 66, weight: .heavy), color: orange)
@@ -97,6 +110,9 @@ drawText("Order today’s freshly prepared vegetarian meals.", at: NSPoint(x: 72
 drawText("neerus-kitchen.netlify.app", at: NSPoint(x: 72, y: 77), font: .systemFont(ofSize: 19, weight: .bold), color: ink)
 card.unlockFocus()
 try writePNG(card, name: "neerus-kitchen-share.png")
+try writeJPEG(card, name: "neerus-kitchen-share-v2.jpg", quality: 0.84)
+try resizeAsset("neerus-kitchen-share.png", width: 1200, height: 630)
+try resizeAsset("neerus-kitchen-share-v2.jpg", width: 1200, height: 630)
 
 // WhatsApp often renders a compact square thumbnail. Keep the logo and food
 // recognizable even when the image is reduced to roughly 80 × 80 pixels.
@@ -106,7 +122,7 @@ NSColor(calibratedRed: 0.985, green: 0.975, blue: 0.945, alpha: 1).setFill()
 NSRect(x: 0, y: 0, width: 600, height: 600).fill()
 
 drawLogo(in: NSRect(x: 38, y: 476, width: 88, height: 88))
-drawText("Neeru’s Kitchen", at: NSPoint(x: 150, y: 518), font: .systemFont(ofSize: 32, weight: .heavy), color: ink)
+drawText("Neeru’s Home Kitchen", at: NSPoint(x: 150, y: 518), font: .systemFont(ofSize: 27, weight: .heavy), color: ink)
 drawText("100% VEGETARIAN · HOME-COOKED", at: NSPoint(x: 152, y: 487), font: .systemFont(ofSize: 11, weight: .bold), color: muted, tracking: 0.9)
 drawText("Fresh food.", at: NSPoint(x: 40, y: 355), font: .systemFont(ofSize: 48, weight: .heavy), color: ink)
 drawText("Feels like home.", at: NSPoint(x: 40, y: 297), font: .systemFont(ofSize: 48, weight: .heavy), color: orange)
@@ -129,6 +145,7 @@ if let photo = NSImage(contentsOf: photoURL) {
 
 whatsappCard.unlockFocus()
 try writeJPEG(whatsappCard, name: "neerus-kitchen-whatsapp-v4.jpg", quality: 0.80)
+try writeJPEG(whatsappCard, name: "neerus-home-kitchen-whatsapp-v5.jpg", quality: 0.82)
 
 for size in [180, 192, 512] {
   let icon = NSImage(size: NSSize(width: size, height: size))
@@ -140,4 +157,5 @@ for size in [180, 192, 512] {
   icon.unlockFocus()
   let name = size == 180 ? "apple-touch-icon.png" : "icon-\(size).png"
   try writePNG(icon, name: name)
+  try resizeAsset(name, width: size, height: size)
 }

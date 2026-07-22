@@ -47,7 +47,7 @@ where menu_date is distinct from (created_at at time zone 'Asia/Kolkata')::date;
 
 update public.storefront_settings
 set upi_id = 'krsnasolo@okicici',
-    merchant_name = 'Neeru''s Kitchen',
+    merchant_name = 'Neeru''s Home Kitchen',
     updated_at = now()
 where id = 1;
 
