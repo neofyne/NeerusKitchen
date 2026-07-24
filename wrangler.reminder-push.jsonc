@@ -1,0 +1,13 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "neerus-kitchen-reminders",
+  "main": "workers/reminder-push.ts",
+  "compatibility_date": "2026-07-23",
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+  "vars": {
+    "SUPABASE_URL": "https://aqwczyplrqpdbxkfflhj.supabase.co",
+    "VAPID_SUBJECT": "mailto:neofyne@gmail.com"
+  }
+}

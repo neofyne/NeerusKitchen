@@ -1,21 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import QRCode from "qrcode";
+import { siPaytm, siPhonepe } from "simple-icons";
 import {
   ArrowLeft,
   Banknote,
   Check,
   ChefHat,
   ChevronRight,
-  CircleUserRound,
   Clock3,
-  Flame,
   Home,
   LogOut,
   MessageCircle,
   Minus,
   Plus,
   ReceiptText,
+  RotateCcw,
   Search,
   ShieldCheck,
   ShoppingBag,
@@ -56,6 +56,9 @@ type StoreCategory = {
   description: string;
   sort_order: number;
 };
+type PaymentNoteLine = { item_name: string; unit_price: number; quantity: number; unit_label?: string };
+type PaymentNoteOrder = { id: string; order_date: string; order_details: string; amount: number; items: PaymentNoteLine[] };
+type PaymentNote = { customer_name: string; total: number; status: "pending" | "submitted"; orders: PaymentNoteOrder[] };
 
 type Profile = {
   id: string;
@@ -68,9 +71,23 @@ type Profile = {
   access_status: "pending" | "approved" | "rejected";
 };
 
+type GuestDetails = {
+  full_name: string;
+  wing: Wing;
+  flat_number: string;
+  phone: string;
+};
+
+type CustomerOrderItem = {
+  menu_item_id: string | null;
+  item_name: string;
+  quantity: number;
+};
+
 type CustomerOrder = {
   id: string;
   created_at: string;
+  customer_phone?: string;
   amount: number;
   stage: string;
   payment_status: string;
@@ -78,6 +95,7 @@ type CustomerOrder = {
   payment_method: "upi" | "cash";
   order_details: string;
   delivery_time: string | null;
+  order_items?: CustomerOrderItem[];
 };
 
 type StoreSettings = {
@@ -91,6 +109,10 @@ type StoreSettings = {
   announcement_title: string;
   announcement_message: string;
   announcement_image_path: string;
+  show_banner_image: boolean;
+  show_customer_message: boolean;
+  show_announcement_title: boolean;
+  show_announcement_message: boolean;
 };
 
 type OrderAlertResult = {
@@ -155,6 +177,10 @@ const defaultSettings: StoreSettings = {
   announcement_title: "",
   announcement_message: "",
   announcement_image_path: "",
+  show_banner_image: true,
+  show_customer_message: true,
+  show_announcement_title: true,
+  show_announcement_message: true,
 };
 
 const localToday = () => {
@@ -162,8 +188,20 @@ const localToday = () => {
   value.setMinutes(value.getMinutes() - value.getTimezoneOffset());
   return value.toISOString().slice(0, 10);
 };
+const deliveryTimeOptions = Array.from({ length: 64 }, (_, index) => {
+  const totalMinutes = (7 * 60) + index * 15;
+  const value = `${String(Math.floor(totalMinutes / 60)).padStart(2, "0")}:${String(totalMinutes % 60).padStart(2, "0")}`;
+  return { value, label: formatTime12(value) };
+});
 
 const formatMoney = (amount: number) => `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(amount)}`;
+const orderNumber = (id: string) => `Order #${String(id).replace(/[^a-z0-9]/gi, "").slice(0, 8).toUpperCase()}`;
+const greetingName = (customerName: string) => {
+  const parts = customerName.trim().split(/\s+/).filter(Boolean);
+  const title = parts[0]?.replace(/\.+$/, "").toLowerCase();
+  if (["dr", "mr", "mrs", "ms", "prof", "shri", "smt", "er"].includes(title) && parts[1]) return `${title === "dr" ? "Dr." : `${parts[0].replace(/\.+$/, "")}.`} ${parts[1]}`;
+  return parts[0] || "there";
+};
 const slugify = (value: string) => value.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const splitFlatAddress = (value = "") => {
   const normalized = value.trim().toUpperCase();
@@ -171,6 +209,20 @@ const splitFlatAddress = (value = "") => {
   return match ? { wing: match[1] as Wing, number: match[2] } : { wing: "" as Wing, number: normalized.replace(/\D/g, "") };
 };
 const flatAddress = (wing: Wing, number: string) => `${wing}-${number}`;
+const guestDetailsStorageKey = "neeru-guest-details";
+const initialGuestDetails = (): GuestDetails => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(guestDetailsStorageKey) || "{}") as Partial<GuestDetails>;
+    return {
+      full_name: saved.full_name || "",
+      wing: ["A", "B", "C", "D"].includes(saved.wing || "") ? saved.wing as Wing : "",
+      flat_number: String(saved.flat_number || "").replace(/\D/g, "").slice(0, 5),
+      phone: String(saved.phone || "").replace(/\D/g, "").slice(0, 10),
+    };
+  } catch {
+    return { full_name: "", wing: "", flat_number: "", phone: "" };
+  }
+};
 const normalizeIndianPhone = (value: string) => {
   let digits = value.replace(/\D/g, "");
   if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
@@ -188,6 +240,19 @@ const savedCart = (): Record<string, number> => {
 };
 export function Storefront() {
   useAutoGrowingTextareas();
+  const [paymentRequest] = useState(() => {
+    const pathMatch = window.location.pathname.match(/^\/pay\/([a-z0-9]{4,12})\/(\d+(?:\.\d{1,2})?)\/?$/i);
+    if (!pathMatch) return null;
+    const orderCode = pathMatch[1].toUpperCase();
+    const amount = Number(pathMatch[2]);
+    return /^[A-Z0-9]{4,12}$/.test(orderCode) && Number.isFinite(amount) && amount > 0
+      ? { orderCode, amount }
+      : null;
+  });
+  const [paymentNoteCode] = useState(() => {
+    const match = window.location.pathname.match(/^\/p\/([a-z0-9]{8,16})\/?$/i);
+    return match?.[1]?.toLowerCase() || "";
+  });
   const [sharedDishId] = useState(() => new URLSearchParams(window.location.search).get("dish") || "");
   const [sharedCategoryPath] = useState(() => {
     const match = window.location.pathname.match(/^\/c\/([^/]+)(?:\/([^/]+))?/);
@@ -211,6 +276,10 @@ export function Storefront() {
   const [placedAlert, setPlacedAlert] = useState<OrderAlertResult | null>(null);
   const [notice, setNotice] = useState("");
   const [phonePreview, setPhonePreview] = useState(false);
+  const [appUpdateReady, setAppUpdateReady] = useState(false);
+  const [bannerImageFailed, setBannerImageFailed] = useState(false);
+
+  useEffect(() => setBannerImageFailed(false), [settings.announcement_image_path]);
 
   useEffect(() => {
     if (!supabase) {
@@ -240,13 +309,80 @@ export function Storefront() {
     loadOrders();
   }, [session]);
 
-  async function loadStore() {
+  // A customer can leave the menu open for hours. Refresh shared menu data
+  // whenever they return to it and periodically while it remains visible, so
+  // availability, prices, banners and categories do not look stale.
+  useEffect(() => {
+    if (!supabase) return;
+    const refreshSharedData = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadStore(true);
+      if (session) {
+        void loadProfile();
+        void loadOrders();
+      }
+    };
+    const timer = window.setInterval(refreshSharedData, 30_000);
+    window.addEventListener("focus", refreshSharedData);
+    document.addEventListener("visibilitychange", refreshSharedData);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshSharedData);
+      document.removeEventListener("visibilitychange", refreshSharedData);
+    };
+  }, [session]);
+
+  const canApplyAppUpdate = !authOpen && !checkoutOpen;
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    const currentAsset = Array.from(document.scripts)
+      .map((script) => script.src ? new URL(script.src, window.location.origin).pathname : "")
+      .find((path) => /^\/assets\/main-[^/]+\.js$/.test(path));
+    if (!currentAsset) return;
+    let stopped = false;
+    let checking = false;
+    const refreshToCurrentBuild = () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("updated", String(Date.now()));
+      window.location.replace(`${url.pathname}${url.search}${url.hash}`);
+    };
+    const checkForUpdate = async () => {
+      if (stopped || checking || document.visibilityState !== "visible") return;
+      checking = true;
+      try {
+        const response = await fetch(`/?update-check=${Date.now()}`, { cache: "no-store", headers: { "Cache-Control": "no-cache" } });
+        if (!response.ok) return;
+        const html = await response.text();
+        const nextAsset = html.match(/src="(\/assets\/main-[^"]+\.js)"/)?.[1];
+        if (!nextAsset || nextAsset === currentAsset) return;
+        if (canApplyAppUpdate) refreshToCurrentBuild();
+        else setAppUpdateReady(true);
+      } catch {
+        // The next focus or timed check retries if the phone was briefly offline.
+      } finally {
+        checking = false;
+      }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible") void checkForUpdate(); };
+    const timer = window.setInterval(checkForUpdate, 60_000);
+    window.addEventListener("focus", checkForUpdate);
+    document.addEventListener("visibilitychange", onVisible);
+    void checkForUpdate();
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", checkForUpdate);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [canApplyAppUpdate]);
+
+  async function loadStore(quiet = false) {
     if (!supabase) return setLoading(false);
-    setLoading(true);
+    if (!quiet) setLoading(true);
     const [{ data: menu }, { data: daily }, { data: configuration }, categoryResult, categoryLinks] = await Promise.all([
       supabase.from("menu_items").select("id,name,price,description,spice_level,photo_path,category_id,unit_label").eq("is_active", true).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", localToday()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number,announcement_enabled,announcement_title,announcement_message,announcement_image_path").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("*").eq("id", 1).maybeSingle(),
       supabase.from("dish_categories").select("id,name,slug,description,sort_order").eq("is_active", true).order("sort_order").order("name"),
       supabase.from("menu_item_categories").select("menu_item_id,category_id"),
     ]);
@@ -297,23 +433,47 @@ export function Storefront() {
 
   async function loadOrders() {
     if (!supabase || !session) return;
-    const { data } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,payment_method,order_details,delivery_time").eq("customer_id", session.user.id).order("created_at", { ascending: false }).limit(30);
+    const { data } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,payment_method,order_details,delivery_time,order_items(menu_item_id,item_name,quantity)").eq("customer_id", session.user.id).order("created_at", { ascending: false }).limit(30);
     setOrders((data || []) as CustomerOrder[]);
   }
 
   const itemHasCategory = (item: StoreMenuItem, categoryId: string) => (item.category_ids || [item.category_id]).includes(categoryId);
+  const pastOrderSuggestions = useMemo(() => {
+    const ranking = new Map<string, { score: number; recentOrder: number }>();
+    const add = (itemId: string, weight: number, recentOrder: number) => {
+      const current = ranking.get(itemId) || { score: 0, recentOrder };
+      ranking.set(itemId, { score: current.score + weight, recentOrder: Math.min(current.recentOrder, recentOrder) });
+    };
+    orders.forEach((order, recentOrder) => {
+      const structuredItems = order.order_items || [];
+      structuredItems.forEach((line) => { if (line.menu_item_id) add(line.menu_item_id, Math.max(1, Number(line.quantity) || 1), recentOrder); });
+      if (!structuredItems.length) {
+        const legacyDetails = order.order_details.toLowerCase();
+        items.forEach((item) => { if (legacyDetails.includes(item.name.toLowerCase())) add(item.id, 1, recentOrder); });
+      }
+    });
+    return items
+      .filter((item) => ranking.has(item.id))
+      .sort((left, right) => (ranking.get(right.id)!.score - ranking.get(left.id)!.score) || (ranking.get(left.id)!.recentOrder - ranking.get(right.id)!.recentOrder))
+      .slice(0, 8);
+  }, [items, orders]);
+  const pastOrderItemIds = useMemo(() => new Set(pastOrderSuggestions.map((item) => item.id)), [pastOrderSuggestions]);
   const visibleItems = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return items.filter((item) => (!query || `${item.name} ${item.description}`.toLowerCase().includes(query)) && (categoryFilter === "all" || itemHasCategory(item, categoryFilter)));
-  }, [items, search, categoryFilter]);
+    return items.filter((item) => {
+      const matchesSearch = !query || `${item.name} ${item.description}`.toLowerCase().includes(query);
+      const matchesCategory = categoryFilter === "all" || (categoryFilter === "past" ? pastOrderItemIds.has(item.id) : itemHasCategory(item, categoryFilter));
+      return matchesSearch && matchesCategory;
+    });
+  }, [items, search, categoryFilter, pastOrderItemIds]);
   const menuGroups = useMemo(() => {
+    if (categoryFilter === "past") return [{ category: { id: "past", name: "Order again", slug: "order-again", description: "Your favourites from past orders, available today.", sort_order: -1 }, items: visibleItems }];
     const known = categories.map((category) => ({ category, items: visibleItems.filter((item) => categoryFilter === "all" ? item.category_id === category.id : itemHasCategory(item, category.id)) })).filter((group) => group.items.length);
     const knownIds = new Set(categories.map((category) => category.id));
     const uncategorized = visibleItems.filter((item) => !item.category_id || !knownIds.has(item.category_id));
     return uncategorized.length ? [...known, { category: { id: "other", name: "Other dishes", slug: "other-dishes", description: "More fresh dishes from our home kitchen.", sort_order: 999 }, items: uncategorized }] : known;
   }, [categories, visibleItems, categoryFilter]);
   const featured = items.filter((item) => item.is_featured);
-  const heroItem = featured[0] || items[0];
   const sharedDish = items.find((item) => item.id === sharedDishId);
   const sharedCategory = categories.find((category) => category.slug === sharedCategoryPath.categorySlug);
   const sharedCategoryItems = sharedCategory ? items.filter((item) => itemHasCategory(item, sharedCategory.id)) : [];
@@ -330,6 +490,14 @@ export function Storefront() {
   const whatsappHref = whatsappNumber
     ? `https://wa.me/${whatsappNumber}?text=${encodeURIComponent("Hi Neeru's Home Kitchen, I have a question about today's menu or my order.")}`
     : "";
+  // An announcement is useful with any combination of its optional image and
+  // copy. Keeping the customer message inside this block makes the content
+  // read in the intended order: image, customer message, then announcement.
+  const showBannerImage = settings.show_banner_image && Boolean(settings.announcement_image_path) && !bannerImageFailed;
+  const showCustomerMessage = settings.show_customer_message && Boolean(settings.hero_message.trim());
+  const showAnnouncementTitle = settings.show_announcement_title && Boolean(settings.announcement_title.trim());
+  const showAnnouncementMessage = settings.show_announcement_message && Boolean(settings.announcement_message.trim());
+  const showAnnouncement = showBannerImage || showCustomerMessage || showAnnouncementTitle || showAnnouncementMessage;
 
   function setQuantity(id: string, quantity: number) {
     setCart((current) => {
@@ -341,20 +509,21 @@ export function Storefront() {
   }
 
   function beginCheckout() {
-    if (!session) return setAuthOpen(true);
-    if (!profile?.full_name || !profile.flat_number) return setView("account");
     setCheckoutOpen(true);
   }
 
   function go(next: StoreView) {
-    if ((next === "orders" || next === "account") && !session) return setAuthOpen(true);
     setView(next);
     window.scrollTo({ top: 0, behavior: "smooth" });
     if (next === "orders") loadOrders();
   }
 
+  if (paymentNoteCode) return <PersonalPaymentNotePage shareCode={paymentNoteCode} settings={settings} />;
+  if (paymentRequest) return <PaymentReminderPage request={paymentRequest} settings={settings} loading={loading} />;
+
   return (
     <div className={`storefront-workspace ${phonePreview ? "storefront-preview" : ""}`}>
+      {appUpdateReady && <div className="app-update-banner storefront-update-banner" role="status"><span><RotateCcw /><b>Menu update ready</b></span><button onClick={() => { const url = new URL(window.location.href); url.searchParams.set("updated", String(Date.now())); window.location.replace(`${url.pathname}${url.search}${url.hash}`); }}>Update now</button></div>}
       {showLocalDevicePreview && <button className="store-device-switch" onClick={() => setPhonePreview((current) => !current)} aria-pressed={phonePreview}>
         <Smartphone />{phonePreview ? "Exit phone preview" : "Preview on phone"}
       </button>}
@@ -368,7 +537,6 @@ export function Storefront() {
             <span className="header-cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span>
             <span className="header-cart-copy"><small>Cart</small><strong>{cartCount > 0 ? formatMoney(cartTotal) : "Empty"}</strong></span>
           </button>
-          <button className={`account-button ${session ? "" : "sign-in"}`} onClick={() => go("account")} aria-label={session ? "Account" : "Sign in"}><CircleUserRound /><span>{session ? "Account" : "Sign in"}</span></button>
         </div>
       </header>
 
@@ -381,45 +549,47 @@ export function Storefront() {
             : sharedDish
               ? <SharedDishMenu item={sharedDish} quantity={cart[sharedDish.id] || 0} onQuantity={setQuantity} onCart={() => go("cart")} />
               : <>
+          {showAnnouncement && <section className="store-announcement">
+            {showBannerImage && <img src={`/api/photos?key=${encodeURIComponent(settings.announcement_image_path)}`} alt="" loading="lazy" decoding="async" onError={() => setBannerImageFailed(true)} />}
+            <div className="store-announcement-copy">
+              {showCustomerMessage && <p>{settings.hero_message}</p>}
+              {showAnnouncementTitle && <strong>{settings.announcement_title}</strong>}
+              {showAnnouncementMessage && <span>{settings.announcement_message}</span>}
+            </div>
+          </section>}
           <section className="store-hero">
-            <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1><p>{settings.hero_message}</p><div className={`open-pill ${acceptingOrders ? "" : "closed"}`}><i />{acceptingOrders ? "Taking orders today" : settings.ordering_open ? "Today’s order cutoff has passed" : "Orders are paused"}{settings.order_cutoff && ` · Until ${settings.order_cutoff.slice(0, 5)}`}</div></div>
-            <div className="hero-plate">{heroItem?.image_url ? <img src={heroItem.image_url} alt={heroItem.name} decoding="async" /> : <UtensilsCrossed />}</div>
+            <div className="hero-copy"><span className="store-eyebrow"><Sparkles /> TODAY AT NEERU’S</span><h1>Good food.<br /><em>Feels like home.</em></h1></div>
           </section>
-          {settings.announcement_enabled && (settings.announcement_title || settings.announcement_message || settings.announcement_image_path) && <section className="store-announcement">{settings.announcement_image_path && <img src={`/api/photos?key=${encodeURIComponent(settings.announcement_image_path)}`} alt="" loading="lazy" decoding="async" />}<strong>{settings.announcement_title}</strong>{settings.announcement_message && <span>{settings.announcement_message}</span>}</section>}
 
-          {featured.length > 0 && <section className="featured-section"><div className="store-section-title"><div><span className="store-eyebrow"><Flame /> KITCHEN FAVOURITES</span><h2>Featured today</h2></div></div><div className="featured-row">{featured.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} featured />)}</div></section>}
+          {!search && categoryFilter === "all" && featured.length > 0 && <section className="featured-section"><div className="store-section-title"><div><span className="store-eyebrow">KITCHEN FAVOURITES</span><h2>Featured today</h2></div></div><div className="featured-row">{featured.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div></section>}
 
           <section className="menu-section">
             <div className="store-section-title"><div><span className="store-eyebrow">FRESHLY PREPARED</span><h2>Today’s menu</h2></div><span>{visibleItems.length} dishes</span></div>
             <div className="store-filters"><label><Search /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search today’s vegetarian menu" /></label></div>
-            {!search && categories.length > 1 && <div className="store-category-chips"><button className={categoryFilter === "all" ? "active" : ""} onClick={() => setCategoryFilter("all")}>All</button>{categories.map((category) => <button className={categoryFilter === category.id ? "active" : ""} onClick={() => setCategoryFilter(category.id)} key={category.id}>{category.name}</button>)}</div>}
-            {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-groups">{menuGroups.map((group) => <section id={`category-${group.category.slug}`} className="store-category-section" key={group.category.id}><div className="store-category-heading"><span><b>{group.category.name}</b><small>{group.category.description}</small></span><em>{group.items.length} dish{group.items.length === 1 ? "" : "es"}</em></div><div className="store-menu-grid">{group.items.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div></section>)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
+            {(categories.length > 1 || pastOrderSuggestions.length > 0) && <div className="store-category-chips"><button className={categoryFilter === "all" ? "active" : ""} onClick={() => setCategoryFilter("all")}>All</button>{pastOrderSuggestions.length > 0 && <button className={categoryFilter === "past" ? "active" : ""} onClick={() => setCategoryFilter("past")}>Order again</button>}{categories.map((category) => <button className={categoryFilter === category.id ? "active" : ""} onClick={() => setCategoryFilter(category.id)} key={category.id}>{category.name}</button>)}</div>}
+            {loading ? <div className="store-empty"><span className="loader" /><b>Preparing today’s menu…</b></div> : visibleItems.length ? <div className="store-menu-groups">{menuGroups.map((group) => <section id={`category-${group.category.slug}`} className="store-category-section" key={group.category.id}><div className="store-category-heading"><span><b>{group.category.name}</b><small>{group.category.description}</small></span><em>{group.items.length} dish{group.items.length === 1 ? "" : "es"}</em></div><div className={`store-menu-grid ${search.trim() ? "is-filtered" : categoryFilter !== "all" ? "is-category-filtered" : ""}`}>{group.items.map((item) => <FoodCard key={item.id} item={item} quantity={cart[item.id] || 0} onQuantity={setQuantity} />)}</div></section>)}</div> : <div className="store-empty"><ChefHat /><b>No dishes match this filter</b><span>Try viewing the full menu.</span></div>}
           </section>
           </>}
         </>}
 
         {view === "cart" && <CartView lines={cartLines} total={cartTotal} orderingOpen={acceptingOrders} onQuantity={setQuantity} onBack={() => go("menu")} onCheckout={beginCheckout} />}
-        {view === "orders" && <OrdersView orders={orders} onBack={() => go("menu")} />}
-        {view === "account" && session && <AccountView session={session} profile={profile} onSaved={(next) => { setProfile(next); setNotice("Your details were saved."); }} onBack={() => go("menu")} />}
       </main>
 
       <nav className="store-bottom-nav">
         <button className={view === "menu" ? "active" : ""} onClick={() => go("menu")}><Home /><span>Home</span></button>
-        <button className={view === "orders" ? "active" : ""} onClick={() => go("orders")}><ReceiptText /><span>My orders</span></button>
         <button className={`cart-nav ${view === "cart" ? "active" : ""}`} onClick={() => go("cart")}><span className="cart-icon"><ShoppingBag />{cartCount > 0 && <b>{cartCount}</b>}</span><span>Cart</span></button>
         {whatsappHref && <a className="store-whatsapp-nav" href={whatsappHref} target="_blank" rel="noreferrer" aria-label="Message Neeru's Home Kitchen on WhatsApp"><MessageCircle /><span>WhatsApp</span></a>}
       </nav>
 
-      {authOpen && <CustomerAuth onClose={() => setAuthOpen(false)} onSuccess={() => { setAuthOpen(false); setNotice("Welcome to Neeru’s Home Kitchen."); }} />}
-      {checkoutOpen && profile && <CheckoutModal lines={cartLines} total={cartTotal} profile={profile} settings={settings} onClose={() => setCheckoutOpen(false)} onEditProfile={() => { setCheckoutOpen(false); setView("account"); }} onPlaced={(order, alert) => { setCheckoutOpen(false); setPlacedOrder(order); setPlacedAlert(alert); setCart({}); loadOrders(); }} />}
-      {placedOrder && <PaymentModal order={placedOrder} settings={settings} alert={placedAlert} onClose={() => { setPlacedOrder(null); setPlacedAlert(null); go("orders"); }} />}
+      {checkoutOpen && <CheckoutModal lines={cartLines} total={cartTotal} settings={settings} onClose={() => setCheckoutOpen(false)} onPlaced={(order) => { setCheckoutOpen(false); setPlacedOrder(order); setCart({}); }} />}
+      {placedOrder && <PaymentModal order={placedOrder} settings={settings} alert={placedAlert} guest onClose={() => { setPlacedOrder(null); setPlacedAlert(null); go("menu"); }} />}
       </div>
     </div>
   );
 }
 
 function StoreLogo() {
-  return <span className="store-logo" aria-hidden="true"><svg viewBox="0 0 48 48"><path className="logo-steam" d="M24 9c-2 2 1 3-1 6M30 8c-2 2 1 3-1 6" /><path className="logo-n" d="M12 35V15l20 20V15" /><path className="logo-fork" d="M8 15v4m3-4v4m3-4v4m3-4v4" /><path className="logo-spoon" d="M32 15c0-2.8 1.7-4.8 4-4.8s4 2 4 4.8-1.7 4.7-4 4.7-4-1.9-4-4.7Z" /></svg></span>;
+  return <span className="store-logo" aria-hidden="true"><img src="/neeru-logo.png" alt="" /></span>;
 }
 
 function SharedDishMenu({ item, quantity, onQuantity, onCart }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; onCart: () => void }) {
@@ -447,11 +617,11 @@ function SharedCategoryMenu({ category, items, hero, cart, onQuantity, onCart }:
   </section>;
 }
 
-function FoodCard({ item, quantity, onQuantity, featured = false }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void; featured?: boolean }) {
+function FoodCard({ item, quantity, onQuantity }: { item: StoreMenuItem; quantity: number; onQuantity: (id: string, quantity: number) => void }) {
   const soldOut = item.portions_available === 0;
   const contents = portionContents(item.unit_label);
-  return <article className={`store-food-card ${featured ? "featured-card" : ""} ${soldOut ? "sold-out" : ""}`}>
-    <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} loading="lazy" decoding="async" /> : <ChefHat />}{featured && <span className="featured-badge"><Sparkles /> Featured</span>}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
+  return <article className={`store-food-card ${soldOut ? "sold-out" : ""}`}>
+    <div className="food-card-image">{item.image_url ? <img src={item.image_url} alt={item.name} loading="lazy" decoding="async" /> : <ChefHat />}{soldOut && <span className="soldout-badge">Sold out</span>}</div>
     <div className="food-card-copy"><div className="food-meta"><span className="diet-dot"><i /></span><span>Vegetarian · {item.spice_level}</span>{item.portions_available !== null && item.portions_available > 0 && item.portions_available <= 5 && <span className="few-left">Only {item.portions_available} left</span>}</div><h3>{item.name}</h3><p>{[item.description, contents && `${contents} per portion`].filter(Boolean).join(" · ")}</p><div className="food-card-bottom"><span className="dish-price"><strong>{formatMoney(item.price)}</strong><small>/ portion</small></span>{quantity > 0 ? <div className="quantity"><button onClick={() => onQuantity(item.id, quantity - 1)} aria-label={`Decrease ${item.name} portions`}><Minus /></button><b>{quantity}</b><button disabled={soldOut || (item.portions_available !== null && quantity >= item.portions_available)} onClick={() => onQuantity(item.id, quantity + 1)} aria-label={`Increase ${item.name} portions`}><Plus /></button></div> : <button className="add-food" disabled={soldOut} onClick={() => onQuantity(item.id, 1)}>{soldOut ? "Unavailable" : <>Add <Plus /></>}</button>}</div></div>
   </article>;
 }
@@ -665,7 +835,8 @@ function AccountView({ session, profile, onSaved, onBack }: { session: Session; 
   return <section className="store-subpage"><button className="store-back" onClick={onBack}><ArrowLeft /> Back to menu</button><div className="subpage-heading"><span className="store-eyebrow">YOUR DETAILS</span><h1>My kitchen profile</h1><p>These details make every future order quicker.</p></div><form className="profile-form" onSubmit={save}><div className="profile-grid"><label><span>Name</span><input value={form.full_name} onChange={(event) => set("full_name", event.target.value)} required /></label><div className="flat-address-fields"><label><span>Tower</span><select value={wing} onChange={(event) => setWing(event.target.value as Wing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option value={option} key={option}>Tower {option}</option>)}</select></label><label className={flatWarning ? "field-warning" : ""}><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={flat} onChange={(event) => updateFlat(event.target.value)} placeholder="For example, 402" aria-describedby="profile-flat-warning" required />{flatWarning && <small id="profile-flat-warning" className="field-warning-text">{flatWarning}</small>}</label></div>{form.email && !isPhoneAccount && <label><span>Email</span><input value={form.email} disabled /></label>}<label><span>{isPhoneAccount ? "Mobile login" : session.user.phone ? "Verified mobile" : <>Phone <small>Optional</small></>}</span><input type="tel" value={form.phone} disabled={isPhoneAccount || Boolean(session.user.phone)} onChange={(event) => set("phone", event.target.value)} /></label></div><fieldset><legend>Usual spice level</legend><div className="profile-choices">{["mild", "medium", "spicy"].map((level) => <button type="button" className={form.spice_preference === level ? "selected" : ""} onClick={() => set("spice_preference", level as Spice)} key={level}>{level}</button>)}</div></fieldset><label><span>Standing instructions <small>Optional</small></span><textarea value={form.standing_instructions} onChange={(event) => set("standing_instructions", event.target.value)} placeholder="For example: no onion, call before delivery…" /></label>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Saving…" : "Save my details"}</button></form><button className="customer-signout" onClick={() => supabase?.auth.signOut()}><LogOut /> Sign out</button></section>;
 }
 
-function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; profile: Profile; settings: StoreSettings; onClose: () => void; onEditProfile: () => void; onPlaced: (order: CustomerOrder, alert: OrderAlertResult | null) => void }) {
+function CheckoutModal({ lines, total, settings, onClose, onPlaced }: { lines: (StoreMenuItem & { quantity: number })[]; total: number; settings: StoreSettings; onClose: () => void; onPlaced: (order: CustomerOrder) => void }) {
+  const [guest, setGuest] = useState<GuestDetails>(initialGuestDetails);
   const [deliveryTime, setDeliveryTime] = useState("");
   const [instructions, setInstructions] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"upi" | "cash">("upi");
@@ -673,31 +844,67 @@ function CheckoutModal({ lines, total, profile, settings, onClose, onEditProfile
   const [message, setMessage] = useState("");
   async function placeOrder(event: React.FormEvent) {
     event.preventDefault(); if (!supabase) return; setBusy(true);
-    const { data, error } = await supabase.rpc("place_customer_order", { p_delivery_time: ceilTimeToQuarter(deliveryTime) || null, p_instructions: instructions, p_items: lines.map((item) => ({ menu_item_id: item.id, quantity: item.quantity })), p_payment_method: paymentMethod });
-    if (error) { setBusy(false); return setMessage(error.message); }
-    const { data: order, error: loadError } = await supabase.from("orders").select("id,created_at,amount,stage,payment_status,payment_reference,payment_method,order_details,delivery_time").eq("id", data).single();
-    if (loadError) { setBusy(false); return setMessage(loadError.message); }
-
-    let alert: OrderAlertResult | null = null;
-    try {
-      const { data: auth } = await supabase.auth.getSession();
-      const firstPhoto = lines.find((item) => item.image_url)?.image_url || "";
-      const response = await fetch("/api/order-alert", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${auth.session?.access_token || ""}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ orderId: data, photoUrl: firstPhoto }),
-      });
-      if (response.ok) alert = await response.json() as OrderAlertResult;
-    } catch {
-      // The order is already safely stored and visible to the kitchen app.
+    const customerName = guest.full_name.trim();
+    const flatNumber = flatAddress(guest.wing, guest.flat_number);
+    const phone = guest.phone.replace(/\D/g, "");
+    if (customerName.length < 2 || !guest.wing || !guest.flat_number || !/^[6-9]\d{9}$/.test(phone)) {
+      setBusy(false);
+      return setMessage("Enter your name, tower, flat number and a valid 10-digit mobile number.");
     }
+    const { data, error } = await supabase.rpc("place_guest_customer_order", {
+      p_customer_name: customerName,
+      p_flat_number: flatNumber,
+      p_customer_phone: phone,
+      p_delivery_time: ceilTimeToQuarter(deliveryTime) || null,
+      p_instructions: instructions,
+      p_items: lines.map((item) => ({ menu_item_id: item.id, quantity: item.quantity })),
+      p_payment_method: paymentMethod,
+    });
+    if (error) { setBusy(false); return setMessage(error.message); }
+    localStorage.setItem(guestDetailsStorageKey, JSON.stringify({ ...guest, full_name: customerName, flat_number: guest.flat_number, phone }));
     setBusy(false);
-    onPlaced(order as CustomerOrder, alert);
+    onPlaced({
+      id: data as string,
+      created_at: new Date().toISOString(),
+      customer_phone: phone,
+      amount: total,
+      stage: "new",
+      payment_status: "pending",
+      payment_reference: null,
+      payment_method: paymentMethod,
+      order_details: lines.map((item) => `${item.name} × ${item.quantity}`).join(", "),
+      delivery_time: ceilTimeToQuarter(deliveryTime) || null,
+    });
   }
-  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="delivery-address"><span><Home /></span><div><b>{profile.full_name}</b><small>Flat {profile.flat_number}</small></div><button type="button" onClick={onEditProfile}>Edit</button></div>{profile.standing_instructions && <div className="standing-instruction"><Check /><span><b>Standing instruction applied</b><small>{profile.standing_instructions}</small></span></div>}<label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label><span>Preferred delivery time</span><input type="time" step="900" value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)} required /></label><fieldset className="payment-method-choice"><legend>How would you like to pay?</legend><div><button type="button" className={paymentMethod === "upi" ? "selected" : ""} onClick={() => setPaymentMethod("upi")}><span className="checkout-payment-icon upi">UPI</span><span><b>Pay online</b><small>Google Pay, PhonePe, Paytm or any UPI app</small></span><Check /></button><button type="button" className={paymentMethod === "cash" ? "selected cash" : ""} onClick={() => setPaymentMethod("cash")}><span className="checkout-payment-icon cash"><Banknote /></span><span><b>Cash on delivery</b><small>Pay the delivery person when your food arrives</small></span><Check /></button></div></fieldset><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} portions</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">{paymentMethod === "cash" ? "Cash on delivery selected. Please keep the exact amount ready." : "You’ll be able to choose your UPI app after the order is created."}</small></form></div>;
+  return <div className="store-modal-bg"><form className="checkout-sheet" onSubmit={placeOrder}><div className="checkout-head"><div><span className="store-eyebrow">DELIVERY DETAILS</span><h2>Almost there</h2></div><button type="button" onClick={onClose}><X /></button></div><div className="guest-details"><label><span>Your name</span><input value={guest.full_name} onChange={(event) => setGuest((current) => ({ ...current, full_name: event.target.value }))} placeholder="For example, Pooja Pawar" autoComplete="name" required /></label><div className="flat-address-fields"><label><span>Tower</span><select value={guest.wing} onChange={(event) => setGuest((current) => ({ ...current, wing: event.target.value as Wing }))} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((tower) => <option value={tower} key={tower}>Tower {tower}</option>)}</select></label><label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" value={guest.flat_number} onChange={(event) => setGuest((current) => ({ ...current, flat_number: event.target.value.replace(/\D/g, "").slice(0, 5) }))} placeholder="For example, 402" required /></label></div><label><span>Mobile number</span><div className="phone-field"><b>+91</b><input type="tel" inputMode="numeric" autoComplete="tel-national" value={guest.phone} onChange={(event) => setGuest((current) => ({ ...current, phone: event.target.value.replace(/\D/g, "").slice(0, 10) }))} placeholder="10-digit mobile number" required /></div><small>Used only for delivery updates and payment reminders.</small></label></div><label><span>Anything just for this order? <small>Optional</small></span><textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="For example: deliver after 7 PM" /></label><label className="checkout-time-select"><span>Preferred delivery time <small>Optional</small></span><select value={deliveryTime} onChange={(event) => setDeliveryTime(event.target.value)}><option value="">No preferred time</option>{deliveryTimeOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select><small>Choose a time only if you need a particular slot.</small></label><fieldset className="payment-method-choice"><legend>How would you like to pay?</legend><div><button type="button" className={paymentMethod === "upi" ? "selected" : ""} onClick={() => setPaymentMethod("upi")}><span className="checkout-payment-icon upi">UPI</span><span><b>Pay online</b><small>Google Pay, PhonePe, Paytm or any UPI app</small></span><Check /></button><button type="button" className={paymentMethod === "cash" ? "selected cash" : ""} onClick={() => setPaymentMethod("cash")}><span className="checkout-payment-icon cash"><Banknote /></span><span><b>Cash on delivery</b><small>Pay the delivery person when your order arrives</small></span><Check /></button></div></fieldset><div className="checkout-review"><span>{lines.reduce((sum, item) => sum + item.quantity, 0)} portions</span><strong>{formatMoney(total)}</strong></div>{message && <div className="auth-message">{message}</div>}<button className="store-primary" disabled={busy}>{busy ? "Placing order…" : <>Place order <ChevronRight /></>}</button><small className="checkout-note">{paymentMethod === "cash" ? "Cash on delivery selected. Please keep the exact amount ready." : "You’ll be able to choose your UPI app after the order is created."}</small></form></div>;
 }
 
-function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrder; settings: StoreSettings; alert: OrderAlertResult | null; onClose: () => void }) {
+function PaymentBrandMark({ app }: { app: "phonepe" | "paytm" }) {
+  const icon = app === "phonepe" ? siPhonepe : siPaytm;
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={icon.path} /></svg>;
+}
+
+function UpiAppActions({ paymentQuery }: { paymentQuery: string }) {
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const genericUpiUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
+  const googlePayUri = paymentQuery
+    ? isIOS ? `gpay://upi/pay?${paymentQuery}` : `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end`
+    : "";
+  const phonePeUri = paymentQuery && isAndroid ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.phonepe.app;end` : "";
+  const paytmUri = paymentQuery && isAndroid ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=net.one97.paytm;end` : "";
+  const amazonPayUri = paymentQuery && isAndroid ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=in.amazon.mShop.android.shopping;end` : "";
+  if (!genericUpiUri) return null;
+  return <div className="upi-app-actions">
+    <a className="upi-app-action gpay-action" href={googlePayUri} aria-label="Pay securely with Google Pay"><span className="payment-app-logo gpay-logo"><img src="/google-pay-mark.svg" alt="Google Pay" /></span><small>Google Pay</small></a>
+    {phonePeUri && <a className="upi-app-action phonepe-action" href={phonePeUri} aria-label="Pay securely with PhonePe"><span className="payment-app-logo phonepe-logo"><PaymentBrandMark app="phonepe" /></span><small>PhonePe</small></a>}
+    {paytmUri && <a className="upi-app-action paytm-action" href={paytmUri} aria-label="Pay securely with Paytm"><span className="payment-app-logo paytm-logo"><PaymentBrandMark app="paytm" /></span><small>Paytm</small></a>}
+    {amazonPayUri && <a className="upi-app-action amazonpay-action" href={amazonPayUri} aria-label="Pay securely with Amazon Pay"><span className="payment-app-logo amazonpay-logo"><b>amazon</b><i>pay</i></span><small>Amazon Pay</small></a>}
+    {isAndroid ? <a className="upi-app-action any-upi-action" href={genericUpiUri} aria-label="Open another installed UPI app"><span className="payment-app-logo any-upi-logo">UPI</span><small>More UPI apps</small></a> : <span className="upi-ios-app-note"><Smartphone /> For Paytm, PhonePe, Amazon Pay or WhatsApp Pay, open that app and scan this QR.</span>}
+  </div>;
+}
+
+function PaymentModal({ order, settings, alert, guest = false, onClose }: { order: CustomerOrder; settings: StoreSettings; alert: OrderAlertResult | null; guest?: boolean; onClose: () => void }) {
   const [qr, setQr] = useState("");
   const [qrKind, setQrKind] = useState<"custom" | "generated" | "">("");
   const [reference, setReference] = useState("");
@@ -706,17 +913,6 @@ function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrde
   const note = `Neeru's Home Kitchen order ${order.id.slice(0, 8).toUpperCase()}`;
   const paymentQuery = settings.upi_id ? new URLSearchParams({ pa: settings.upi_id, pn: settings.merchant_name, am: Number(order.amount).toFixed(2), cu: "INR", tn: note }).toString() : "";
   const paymentUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
-  const isAndroid = /Android/i.test(navigator.userAgent);
-  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-  const googlePayUri = paymentQuery
-    ? isIOS ? `gpay://upi/pay?${paymentQuery}` : `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end`
-    : "";
-  const paytmUri = paymentQuery && isAndroid
-    ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=net.one97.paytm;end`
-    : "";
-  const phonePeUri = paymentQuery && isAndroid
-    ? `intent://pay?${paymentQuery}#Intent;scheme=upi;package=com.phonepe.app;end`
-    : "";
   useEffect(() => {
     let cancelled = false;
     let objectUrl = "";
@@ -753,8 +949,10 @@ function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrde
   }, [paymentUri]);
   async function submitReference() {
     if (!supabase || !reference.trim()) return setMessage("Enter the UPI transaction reference after paying.");
-    const { error } = await supabase.rpc("submit_payment_reference", { p_order_id: order.id, p_reference: reference.trim() });
-    setMessage(error ? error.message : "Payment reference sent. The kitchen will verify it shortly.");
+    const result = guest
+      ? await supabase.rpc("submit_guest_payment_reference", { p_order_id: order.id, p_customer_phone: order.customer_phone || "", p_reference: reference.trim() })
+      : await supabase.rpc("submit_payment_reference", { p_order_id: order.id, p_reference: reference.trim() });
+    setMessage(result.error ? result.error.message : "Payment reference sent to the kitchen. It will be verified shortly.");
   }
   async function copyUpiId() {
     try {
@@ -784,22 +982,109 @@ function PaymentModal({ order, settings, alert, onClose }: { order: CustomerOrde
               <div>
                 <div className="upi-trust-heading"><span><ShieldCheck /></span><div><b>Safe UPI payment</b><small>Opens your own payment app. Neeru’s Kitchen never sees your bank details.</small></div></div>
                 <small className="upi-scan-note">{qrKind === "custom" ? "Scan this QR from another screen, or choose your app below." : "Choose your payment app below, or scan this QR from another screen."}</small>
-                <div className="upi-app-actions">
-                  <a className="upi-app-action gpay-action" href={googlePayUri} aria-label="Pay securely with Google Pay"><span className="payment-app-logo gpay-logo"><i>G</i><b>Pay</b></span><small>Google Pay</small></a>
-                  {phonePeUri && <a className="upi-app-action phonepe-action" href={phonePeUri} aria-label="Pay securely with PhonePe"><span className="payment-app-logo phonepe-logo">पे</span><small>PhonePe</small></a>}
-                  {paytmUri && <a className="upi-app-action paytm-action" href={paytmUri} aria-label="Pay securely with Paytm"><span className="payment-app-logo paytm-logo">paytm</span><small>Paytm</small></a>}
-                  <a className="upi-app-action any-upi-action" href={paymentUri} aria-label="Pay with any installed UPI app"><span className="payment-app-logo any-upi-logo">UPI</span><small>Any UPI app</small></a>
-                </div>
+                <UpiAppActions paymentQuery={paymentQuery} />
                 <div className="upi-id-row"><code>{settings.upi_id}</code><button type="button" onClick={copyUpiId}>Copy</button></div>
                 {copyMessage && <span className="upi-copy-message">{copyMessage}</span>}
               </div>
             </div>
-            <label className="reference-field"><span>UPI transaction reference</span><div><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Enter after payment" /><button type="button" onClick={submitReference}>Submit</button></div></label>
+            <label className="reference-field"><span>I have paid — UPI reference</span><div><input value={reference} onChange={(event) => setReference(event.target.value)} placeholder="Enter the transaction number" /><button type="button" onClick={submitReference}>Send to kitchen</button></div><small>This creates a payment alert in the kitchen order desk.</small></label>
           </>
         ) : <div className="pay-later"><Clock3 /><span><b>Payment details coming shortly</b><small>The kitchen will confirm how to pay for this order.</small></span></div>}
         {message && <div className="auth-message success">{message}</div>}
-        <button className="store-primary" onClick={onClose}>View my orders</button>
+        <button className="store-primary" onClick={onClose}>{guest ? "Back to menu" : "View my orders"}</button>
       </section>
     </div>
   );
+}
+
+function PersonalPaymentNotePage({ shareCode, settings }: { shareCode: string; settings: StoreSettings }) {
+  const [note, setNote] = useState<PaymentNote | null>(null);
+  const [error, setError] = useState("");
+  const [qr, setQr] = useState("");
+  useEffect(() => {
+    if (!supabase) return setError("Payment details are not connected right now. Please contact Neeru.");
+    supabase.rpc("get_payment_note_request", { p_share_code: shareCode }).then(({ data, error: requestError }) => {
+      if (requestError || !data) setError(requestError?.message || "This payment link is no longer available.");
+      else setNote(data as PaymentNote);
+    });
+  }, [shareCode]);
+  const paymentQuery = note && settings.upi_id ? new URLSearchParams({ pa: settings.upi_id, pn: settings.merchant_name, am: Number(note.total).toFixed(2), cu: "INR", tn: "Neeru's Home Kitchen payment" }).toString() : "";
+  const paymentUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
+  useEffect(() => {
+    let cancelled = false;
+    if (!paymentUri) return setQr("");
+    QRCode.toDataURL(paymentUri, { width: 280, margin: 1, color: { dark: "#17211b", light: "#ffffff" } }).then((value) => { if (!cancelled) setQr(value); }).catch(() => { if (!cancelled) setQr(""); });
+    return () => { cancelled = true; };
+  }, [paymentUri]);
+  const formatDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
+  return <div className="storefront-workspace payment-reminder-workspace"><main className="storefront store-payment-page">
+    <header className="payment-reminder-header"><a className="store-brand" href="/"><StoreLogo /><span><strong>Neeru’s Home Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></a><a href="/" className="payment-menu-link">Today’s menu</a></header>
+    <section className="payment-reminder-card personal-payment-note">
+      <span className="payment-success"><ReceiptText /></span>
+      <span className="store-eyebrow">A NOTE FROM NEERU</span>
+      <h1>Food &amp; payment details</h1>
+      {error ? <div className="pay-later"><Clock3 /><span><b>Payment link unavailable</b><small>{error}</small></span></div> : !note ? <div className="pay-later"><i className="store-loader" /><span><b>Preparing your payment details</b><small>Just a moment.</small></span></div> : <>
+        <p>Hi {greetingName(note.customer_name)}, hope you enjoyed the food. Here is a clear summary of the orders still awaiting payment.</p>
+        <div className="payment-note-orders">{note.orders.map((order) => <article key={order.id}><header><span><small>{orderNumber(order.id)}</small><b>{formatDate(order.order_date)}</b></span><strong>{formatMoney(Number(order.amount))}</strong></header>{order.items?.length ? <ul>{order.items.map((item, index) => <li key={`${item.item_name}-${index}`}><span>{item.quantity}× {item.item_name}</span><b>{formatMoney(Number(item.unit_price) * item.quantity)}</b></li>)}</ul> : <p>{order.order_details}</p>}</article>)}</div>
+        <div className="payment-total"><span>Total due</span><strong>{formatMoney(Number(note.total))}</strong></div>
+        {paymentUri ? <>
+          <div className="upi-panel">{qr ? <img src={qr} alt="UPI payment QR" /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}<div><div className="upi-trust-heading"><span><ShieldCheck /></span><div><b>Choose your payment app</b><small>Only the app you choose handles your payment.</small></div></div><small className="upi-scan-note">Choose an app below, or scan this QR from another screen.</small><UpiAppActions paymentQuery={paymentQuery} /></div></div>
+        </> : <div className="pay-later"><Clock3 /><span><b>Payment details are not ready yet</b><small>Please contact Neeru’s Home Kitchen to complete this payment.</small></span></div>}
+      </>}
+      <a className="store-primary payment-menu-button" href="/">See today’s menu <ChevronRight /></a>
+    </section>
+  </main></div>;
+}
+
+function PaymentReminderPage({ request, settings, loading }: { request: { orderCode: string; amount: number }; settings: StoreSettings; loading: boolean }) {
+  const [qr, setQr] = useState("");
+  const [copyMessage, setCopyMessage] = useState("");
+  const note = `Neeru's Home Kitchen order ${request.orderCode}`;
+  const paymentQuery = settings.upi_id
+    ? new URLSearchParams({ pa: settings.upi_id, pn: settings.merchant_name, am: request.amount.toFixed(2), cu: "INR", tn: note }).toString()
+    : "";
+  const paymentUri = paymentQuery ? `upi://pay?${paymentQuery}` : "";
+  useEffect(() => {
+    let cancelled = false;
+    if (!paymentUri) {
+      setQr("");
+      return;
+    }
+    QRCode.toDataURL(paymentUri, { width: 280, margin: 1, color: { dark: "#17211b", light: "#ffffff" } })
+      .then((generated) => { if (!cancelled) setQr(generated); })
+      .catch(() => { if (!cancelled) setQr(""); });
+    return () => { cancelled = true; };
+  }, [paymentUri]);
+  async function copyUpiId() {
+    try {
+      await navigator.clipboard.writeText(settings.upi_id);
+      setCopyMessage("UPI ID copied");
+    } catch {
+      setCopyMessage(`UPI ID: ${settings.upi_id}`);
+    }
+  }
+  return <div className="storefront-workspace payment-reminder-workspace"><main className="storefront store-payment-page">
+    <header className="payment-reminder-header"><a className="store-brand" href="/"><StoreLogo /><span><strong>Neeru’s Home Kitchen</strong><small>100% VEGETARIAN · HOME-COOKED</small></span></a><a href="/" className="payment-menu-link">Today’s menu</a></header>
+    <section className="payment-reminder-card">
+      <span className="payment-success"><ShieldCheck /></span>
+      <span className="store-eyebrow">PAYMENT REMINDER</span>
+      <h1>Pay Neeru’s Kitchen</h1>
+      <p>Please pay the amount below for order <b>#{request.orderCode}</b>.</p>
+      <div className="payment-total"><span>Amount due</span><strong>{formatMoney(request.amount)}</strong></div>
+      {loading ? <div className="pay-later"><i className="store-loader" /><span><b>Preparing secure payment options</b><small>Just a moment while we load Neeru’s UPI details.</small></span></div> : paymentUri ? <>
+        <div className="upi-panel">
+          {qr ? <img src={qr} alt={`UPI payment QR for order ${request.orderCode}`} /> : <span className="payment-qr-loading"><i className="store-loader" />Preparing QR…</span>}
+          <div>
+            <div className="upi-trust-heading"><span><ShieldCheck /></span><div><b>Choose your payment app</b><small>Your payment opens only in the app you select. Neeru’s Kitchen never sees your bank details.</small></div></div>
+            <small className="upi-scan-note">Choose an app below, or scan this QR from another screen.</small>
+            <UpiAppActions paymentQuery={paymentQuery} />
+            <div className="upi-id-row"><code>{settings.upi_id}</code><button type="button" onClick={copyUpiId}>Copy</button></div>
+            {copyMessage && <span className="upi-copy-message">{copyMessage}</span>}
+          </div>
+        </div>
+        <div className="payment-reminder-note"><MessageCircle /><span><b>After paying, reply on WhatsApp</b><small>Send the transaction reference and Neeru will verify it.</small></span></div>
+      </> : <div className="pay-later"><Clock3 /><span><b>Payment details are not ready yet</b><small>Please contact Neeru’s Home Kitchen to complete this payment.</small></span></div>}
+      <a className="store-primary payment-menu-button" href="/">See today’s menu <ChevronRight /></a>
+    </section>
+  </main></div>;
 }

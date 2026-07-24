@@ -82,11 +82,15 @@ export const onRequest = async (context: Context): Promise<Response> => {
   }
 
   if (request.method === "POST") {
-    const admin = await isAdmin(request, env);
-    if (!admin) return reply(request, { error: "Family administrator access required" }, 403);
+    // Reading formData consumes the request body. Keep a pristine copy for
+    // menu, order and payment uploads, which are still stored in Netlify
+    // Blobs while banner images live in R2.
+    const legacyUpload = request.clone();
     const form = await request.formData();
     const photo = form.get("photo");
-    if (form.get("purpose") !== "banner" || !(photo instanceof File)) return fetch(legacyRequest(request));
+    if (form.get("purpose") !== "banner" || !(photo instanceof File)) return fetch(legacyRequest(legacyUpload));
+    const admin = await isAdmin(request, env);
+    if (!admin) return reply(request, { error: "Family administrator access required" }, 403);
     if (!ALLOWED_TYPES.has(photo.type) || photo.size > MAX_BANNER_BYTES) return reply(request, { error: "Use a JPG, PNG, WebP or HEIC banner under 512 KB" }, 400);
     const extension = photo.name.split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
     const imageKey = `banner/${admin.id}/${crypto.randomUUID()}.${extension}`;

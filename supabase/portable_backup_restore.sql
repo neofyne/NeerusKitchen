@@ -358,17 +358,27 @@ begin
 
   insert into public.storefront_settings (
     id, ordering_open, hero_message, upi_id, merchant_name,
-    order_cutoff, whatsapp_number, updated_at
+    order_cutoff, whatsapp_number, announcement_enabled, announcement_title,
+    announcement_message, announcement_image_path, show_banner_image,
+    show_customer_message, show_announcement_title, show_announcement_message,
+    updated_at
   )
   select
     coalesce(settings.id, 1), coalesce(settings.ordering_open, true),
     coalesce(settings.hero_message, ''), coalesce(settings.upi_id, ''),
     coalesce(settings.merchant_name, 'Neeru''s Home Kitchen'),
     settings.order_cutoff, coalesce(settings.whatsapp_number, ''),
+    coalesce(settings.announcement_enabled, true), coalesce(settings.announcement_title, ''),
+    coalesce(settings.announcement_message, ''), coalesce(settings.announcement_image_path, ''),
+    coalesce(settings.show_banner_image, true), coalesce(settings.show_customer_message, true),
+    coalesce(settings.show_announcement_title, true), coalesce(settings.show_announcement_message, true),
     coalesce(settings.updated_at, now())
   from jsonb_to_recordset(coalesce(v_data -> 'storefront_settings', '[]'::jsonb)) as settings(
     id smallint, ordering_open boolean, hero_message text, upi_id text,
-    merchant_name text, order_cutoff time, whatsapp_number text, updated_at timestamptz
+    merchant_name text, order_cutoff time, whatsapp_number text,
+    announcement_enabled boolean, announcement_title text, announcement_message text,
+    announcement_image_path text, show_banner_image boolean, show_customer_message boolean,
+    show_announcement_title boolean, show_announcement_message boolean, updated_at timestamptz
   )
   on conflict (id) do update set
     ordering_open = excluded.ordering_open,
@@ -377,11 +387,19 @@ begin
     merchant_name = excluded.merchant_name,
     order_cutoff = excluded.order_cutoff,
     whatsapp_number = excluded.whatsapp_number,
+    announcement_enabled = excluded.announcement_enabled,
+    announcement_title = excluded.announcement_title,
+    announcement_message = excluded.announcement_message,
+    announcement_image_path = excluded.announcement_image_path,
+    show_banner_image = excluded.show_banner_image,
+    show_customer_message = excluded.show_customer_message,
+    show_announcement_title = excluded.show_announcement_title,
+    show_announcement_message = excluded.show_announcement_message,
     updated_at = now();
 
   insert into public.orders (
     id, order_date, customer_id, legacy_customer_id, customer_name,
-    flat_number, order_details, delivery_time, amount, delivered_by,
+    flat_number, order_details, delivery_time, reminder_time, reminder_offset_minutes, amount, delivered_by,
     is_paid, stage, remarks, photo_path, source, payment_status,
     payment_reference, payment_method, created_at, updated_at
   )
@@ -394,6 +412,8 @@ begin
     item.flat_number,
     item.order_details,
     item.delivery_time,
+    item.reminder_time,
+    item.reminder_offset_minutes,
     coalesce(item.amount, 0),
     coalesce(item.delivered_by, 'nanny')::public.delivery_person,
     coalesce(item.is_paid, false),
@@ -409,7 +429,7 @@ begin
   from jsonb_to_recordset(v_data -> 'orders') as item(
     id uuid, order_date date, customer_id uuid, legacy_customer_id uuid,
     customer_name text, flat_number text, order_details text,
-    delivery_time time, amount numeric, delivered_by text, is_paid boolean,
+    delivery_time time, reminder_time time, reminder_offset_minutes integer, amount numeric, delivered_by text, is_paid boolean,
     stage text, remarks text, photo_path text, source text,
     payment_status text, payment_reference text, payment_method text,
     created_at timestamptz, updated_at timestamptz

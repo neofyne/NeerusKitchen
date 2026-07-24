@@ -16,7 +16,13 @@ const migrations = [
   "two_state_orders.sql",
   "delivered_photo_guard.sql",
   "admin_action_centre.sql",
+  "customer_admin_notes.sql",
+  "delivery_reminders.sql",
+  "push_reminders.sql",
+  "storefront_display_controls.sql",
   "portable_backup_restore.sql",
+  "guest_customer_checkout.sql",
+  "customer_directory.sql",
 ];
 
 const sections = await Promise.all(migrations.map(async (name) => {

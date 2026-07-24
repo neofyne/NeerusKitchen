@@ -8,6 +8,8 @@ create table public.orders (
   flat_number text not null,
   order_details text not null,
   delivery_time time,
+  reminder_time time,
+  reminder_offset_minutes integer check (reminder_offset_minutes is null or reminder_offset_minutes between 1 and 720),
   amount numeric(10,2) not null default 0 check (amount >= 0),
   delivered_by public.delivery_person not null default 'nanny',
   is_paid boolean not null default false,

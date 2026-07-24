@@ -1,8 +1,13 @@
 import { useLayoutEffect } from "react";
 
 export function autoGrow(element: HTMLTextAreaElement) {
-  element.style.height = "0px";
-  element.style.height = `${element.scrollHeight}px`;
+  // iOS Safari measures scrollHeight inside the borders. Add them back and
+  // make the inline height authoritative so no form-specific height clips it.
+  element.style.setProperty("height", "auto", "important");
+  const styles = window.getComputedStyle(element);
+  const borderHeight = (Number.parseFloat(styles.borderTopWidth) || 0) + (Number.parseFloat(styles.borderBottomWidth) || 0);
+  const nextHeight = Math.ceil(element.scrollHeight + borderHeight);
+  element.style.setProperty("height", `${nextHeight}px`, "important");
 }
 
 export function useAutoGrowingTextareas() {
@@ -14,6 +19,7 @@ export function useAutoGrowingTextareas() {
       if (event.target instanceof HTMLTextAreaElement) autoGrow(event.target);
     };
     resizeAll();
+    void document.fonts?.ready.then(resizeAll);
     document.addEventListener("input", onInput);
     window.addEventListener("resize", resizeAll);
     const observer = new MutationObserver(resizeAll);

@@ -48,5 +48,5 @@ export function composePromotionShareText(text: string, urlValue: string) {
     .replace(new RegExp(`(?:\\s*Order here:\\s*)?${escapedUrl}`, "gi"), "")
     .replace(/\n*❤️\s*\*?Neeru\*?\s*$/i, "")
     .trim();
-  return `${body}\n\n❤️ *Neeru*\n\n🛒 *Order now*\n${url}`;
+  return `${body}\n\n🛒 *Order now*\n${url}`;
 }

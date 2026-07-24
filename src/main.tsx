@@ -5,6 +5,7 @@ import QRCode from "qrcode";
 import {
   Archive,
   Bell,
+  Banknote,
   CalendarDays,
   Camera,
   Check,
@@ -57,10 +58,11 @@ import { Storefront } from "./storefront";
 import { supabase } from "./supabase";
 import { autoGrow, useAutoGrowingTextareas } from "./autoGrow";
 import { ceilTimeToQuarter, composePromotionShareText, formatTime12, promotionTimingLines, quarterHourMinutes } from "./promotionFormat";
+import { disablePhonePush, enablePhonePush, getPhonePushStatus, type PhonePushStatus } from "./pushNotifications";
 
 type Stage = "new" | "delivered";
 type DeliveryBy = "nanny" | "others";
-type Screen = "orders" | "menu" | "settings";
+type Screen = "orders" | "clients" | "menu" | "settings";
 
 type OrderLine = {
   id?: string;
@@ -80,6 +82,8 @@ type Order = {
   flat_number: string;
   order_details: string;
   delivery_time: string | null;
+  reminder_time?: string | null;
+  reminder_offset_minutes?: number | null;
   amount: number;
   delivered_by: DeliveryBy;
   is_paid: boolean;
@@ -129,12 +133,31 @@ type CustomerProfile = {
   flat_number: string;
   delivered_by: DeliveryBy;
 };
+type CustomerDirectoryEntry = {
+  customer_key: string;
+  customer_name: string;
+  customer_phone: string;
+  flat_number: string;
+  first_order_at: string;
+  last_order_at: string;
+  order_count: number;
+  total_spend: number;
+  paid_total: number;
+  pending_total: number;
+  delivered_count: number;
+};
+type CustomerDirectorySort = "spend-desc" | "spend-asc" | "recent" | "name" | "tower" | "pending";
 type CustomerHistory = {
   customer_name: string;
   flat_number: string;
   orders: Order[];
   admin_remarks: string;
   customer_phone?: string;
+};
+type PaymentNoteRequest = {
+  share_code: string;
+  total: number;
+  customer_name: string;
 };
 type ExportOptions = {
   from: string;
@@ -160,7 +183,27 @@ type AdminStoreSettings = {
   announcement_title: string;
   announcement_message: string;
   announcement_image_path: string;
+  show_banner_image: boolean;
+  show_customer_message: boolean;
+  show_announcement_title: boolean;
+  show_announcement_message: boolean;
 };
+const normalizeStorefrontSettings = (settings: Partial<AdminStoreSettings>): AdminStoreSettings => ({
+  ordering_open: settings.ordering_open ?? true,
+  hero_message: settings.hero_message ?? "Fresh home-style food, prepared with care and delivered to your door.",
+  upi_id: settings.upi_id ?? "krsnasolo@okicici",
+  merchant_name: settings.merchant_name ?? "Neeru's Home Kitchen",
+  order_cutoff: settings.order_cutoff ?? "",
+  whatsapp_number: settings.whatsapp_number ?? "918684000013",
+  announcement_enabled: settings.announcement_enabled ?? true,
+  announcement_title: settings.announcement_title ?? "",
+  announcement_message: settings.announcement_message ?? "",
+  announcement_image_path: settings.announcement_image_path ?? "",
+  show_banner_image: settings.show_banner_image ?? true,
+  show_customer_message: settings.show_customer_message ?? true,
+  show_announcement_title: settings.show_announcement_title ?? true,
+  show_announcement_message: settings.show_announcement_message ?? true,
+});
 type PaymentSettingsUpdate = Pick<AdminStoreSettings, "upi_id" | "merchant_name">;
 type AdminAccountUpdate = { email: string; currentPassword: string; newPassword: string };
 type PortableBackup = {
@@ -198,7 +241,7 @@ function isPortableBackup(value: unknown): value is PortableBackup {
 }
 
 const stages: { key: Stage; label: string; badge: string; short: string; color: string }[] = [
-  { key: "new", label: "Orders", badge: "Order", short: "Orders", color: "blue" },
+  { key: "new", label: "To deliver", badge: "To deliver", short: "To deliver", color: "blue" },
   { key: "delivered", label: "Delivered", badge: "Delivered", short: "Delivered", color: "green" },
 ];
 const normalizeStage = (value?: string): Stage => value === "delivered" ? "delivered" : "new";
@@ -367,11 +410,8 @@ starterImage.set("missa parantha", "/food/missa-parantha.jpg");
 starterImage.set("paneer parantha", "/food/paneer-parantha.jpg");
 starterImage.set("vegetable parantha", "/food/vegetable-parantha.jpg");
 starterImage.set("besan chilla", "/food/besan-chilla.jpg");
-const today = () => {
-  const local = new Date();
-  local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
-  return local.toISOString().slice(0, 10);
-};
+const dateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+const today = () => dateKey(new Date());
 const emptyDraft = (date: string): Draft => ({
   order_date: date,
   customer_name: "",
@@ -379,6 +419,8 @@ const emptyDraft = (date: string): Draft => ({
   flat_number: "",
   order_details: "",
   delivery_time: "",
+  reminder_time: "",
+  reminder_offset_minutes: null,
   amount: 0,
   delivered_by: "nanny",
   is_paid: false,
@@ -408,10 +450,85 @@ const dateLabel = (date: string) =>
   new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "short" }).format(
     new Date(`${date}T00:00:00`),
   );
+const fullDateLabel = (date: string) =>
+  new Intl.DateTimeFormat("en-IN", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(
+    new Date(`${date}T00:00:00`),
+  );
 const shift = (date: string, days: number) => {
-  const d = new Date(`${date}T00:00:00`);
+  const [year, month, day] = date.split("-").map(Number);
+  const d = new Date(year, month - 1, day);
   d.setDate(d.getDate() + days);
-  return d.toISOString().slice(0, 10);
+  return dateKey(d);
+};
+type OrderReviewRange = "day" | "7" | "15" | "30" | "year" | "custom";
+type FulfillmentFilter = "all" | "new" | "delivered";
+const orderDateWindow = (anchor: string, range: OrderReviewRange, customFrom: string, customTo: string) => {
+  if (range === "custom") {
+    const from = customFrom || customTo || anchor;
+    const to = customTo || customFrom || anchor;
+    return { from, to };
+  }
+  if (range === "year") return { from: `${anchor.slice(0, 4)}-01-01`, to: anchor };
+  const days = range === "day" ? 1 : Number(range);
+  return { from: shift(anchor, -(days - 1)), to: anchor };
+};
+const reminderOffsets = [15, 30, 45, 60] as const;
+const timeMinutes = (value?: string | null) => {
+  if (!value) return null;
+  const [hours, minutes] = value.slice(0, 5).split(":").map(Number);
+  return Number.isFinite(hours) && Number.isFinite(minutes) ? hours * 60 + minutes : null;
+};
+const timeEarlier = (value: string, minutes: number) => {
+  const total = timeMinutes(value);
+  if (total === null) return "";
+  const adjusted = (total - minutes + 1440) % 1440;
+  return `${String(Math.floor(adjusted / 60)).padStart(2, "0")}:${String(adjusted % 60).padStart(2, "0")}`;
+};
+const customerKey = (order: Pick<Order, "customer_name" | "customer_phone" | "flat_number">) => {
+  const phone = (order.customer_phone || "").replace(/\D/g, "");
+  return phone || `${order.customer_name.trim().toLowerCase()}|${order.flat_number.trim().toLowerCase()}`;
+};
+const orderNumber = (order: Pick<Order, "id">) => `Order #${String(order.id).replace(/[^a-z0-9]/gi, "").slice(0, 8).toUpperCase()}`;
+const greetingName = (customerName?: string | null) => {
+  const parts = (customerName || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "there";
+  const title = parts[0].replace(/\.+$/, "").toLowerCase();
+  if (["dr", "mr", "mrs", "ms", "prof", "shri", "smt", "er"].includes(title) && parts[1]) {
+    const displayTitle = title === "dr" ? "Dr." : `${parts[0].replace(/\.+$/, "")}.`;
+    return `${displayTitle} ${parts[1].replace(/^[,]+|[,]+$/g, "")}`;
+  }
+  return parts[0].replace(/^[,]+|[,]+$/g, "");
+};
+const paymentNoteText = (orders: Order[], shareCode: string, format: "plain" | "whatsapp" = "plain") => {
+  const selected = [...orders].sort((a, b) => a.order_date.localeCompare(b.order_date) || (a.created_at || "").localeCompare(b.created_at || ""));
+  const firstName = greetingName(selected[0]?.customer_name);
+  const total = selected.reduce((sum, order) => sum + Number(order.amount), 0);
+  const paymentPage = new URL(`/p/${shareCode}`, window.location.origin).toString();
+  const emphasize = (text: string) => format === "whatsapp" ? `*${text}*` : text;
+  const detailBlocks = selected.map((order) => {
+    const items = order.items?.length
+      ? order.items.map((item) => `${emphasize(item.item_name)}\n${item.quantity}×${money(Number(item.unit_price))} = ${money(Number(item.unit_price) * item.quantity)}`)
+      : [`${order.order_details || "Order details"} = ${money(Number(order.amount))}`];
+    // A date is useful only when several orders are included. The customer
+    // sees the food calculation first for a simple, personal payment note.
+    return [...(selected.length > 1 ? [emphasize(dateLabel(order.order_date))] : []), ...items].join("\n");
+  });
+  return [
+    `Hi ${firstName}, hope you enjoyed the food from Neeru's Home Kitchen.`,
+    detailBlocks.join("\n\n"),
+    `${emphasize("Your total:")} ${money(total)}`,
+    emphasize("Pay securely"),
+    paymentPage,
+  ].join("\n\n");
+};
+const deliveryReminderText = (order: Order) => {
+  const firstName = greetingName(order.customer_name);
+  const deliveryTime = order.delivery_time ? formatTime12(order.delivery_time) : "the planned delivery time";
+  return [
+    `Hi ${firstName}, a gentle reminder from Neeru's Home Kitchen: your order for Flat ${order.flat_number} is planned for ${deliveryTime}.`,
+    "If the timing needs any change, please reply here and we will try to help.",
+    `Today’s menu for another order: ${window.location.origin}/`,
+  ].join("\n\n");
 };
 
 const publicMenuPhotoUrl = (path: string) => photoApiUrl(`?key=${encodeURIComponent(path)}`);
@@ -419,10 +536,23 @@ const publicMenuPhotoUrl = (path: string) => photoApiUrl(`?key=${encodeURICompon
 export function AdminApp() {
   useAutoGrowingTextareas();
   const [selectedDate, setSelectedDate] = useState(today());
+  const [reviewRange, setReviewRange] = useState<OrderReviewRange>("day");
+  const [customReviewFrom, setCustomReviewFrom] = useState("");
+  const [customReviewTo, setCustomReviewTo] = useState("");
   const [orders, setOrders] = useState<Order[]>([]);
+  const [pendingPayments, setPendingPayments] = useState<Order[]>([]);
+  const [pendingPaymentsLoading, setPendingPaymentsLoading] = useState(false);
+  const [paymentDeskOpen, setPaymentDeskOpen] = useState(false);
   const [menuItems, setMenuItems] = useState<MenuItem[]>(starterMenu);
   const [dishCategories, setDishCategories] = useState<DishCategory[]>([]);
   const [customers, setCustomers] = useState<CustomerProfile[]>([]);
+  const [customerDirectory, setCustomerDirectory] = useState<CustomerDirectoryEntry[]>([]);
+  const [customerDirectoryLoading, setCustomerDirectoryLoading] = useState(false);
+  const [customerDirectoryError, setCustomerDirectoryError] = useState("");
+  const [customerDirectorySearch, setCustomerDirectorySearch] = useState("");
+  const [customerDirectorySort, setCustomerDirectorySort] = useState<CustomerDirectorySort>("spend-desc");
+  const [customerDirectoryTower, setCustomerDirectoryTower] = useState<BuildingWing>("");
+  const [editingCustomer, setEditingCustomer] = useState<CustomerDirectoryEntry | null>(null);
   const [notificationOrders, setNotificationOrders] = useState<Order[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem("neeru-admin-alert-sound") !== "off");
@@ -431,7 +561,7 @@ export function AdminApp() {
   const [deliveryFilter, setDeliveryFilter] = useState<"all" | DeliveryBy>("all");
   const [view, setView] = useState<"board" | "list">("board");
   const [screen, setScreen] = useState<Screen>("orders");
-  const [activeStage, setActiveStage] = useState<Stage>("new");
+  const [fulfillmentFilter, setFulfillmentFilter] = useState<FulfillmentFilter>("all");
   const [large, setLarge] = useState(() => localStorage.getItem("neeru-text-size") !== "standard");
   const [dark, setDark] = useState(() => localStorage.getItem("neeru-theme") === "dark");
   const [phonePreview, setPhonePreview] = useState(false);
@@ -443,6 +573,8 @@ export function AdminApp() {
   const [deliveringOrder, setDeliveringOrder] = useState<Order | null>(null);
   const [deliveryBusy, setDeliveryBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [addingItems, setAddingItems] = useState(false);
+  const [newOrderPrefill, setNewOrderPrefill] = useState<Partial<Draft> | null>(null);
   const [menuAdding, setMenuAdding] = useState(false);
   const [menuEditing, setMenuEditing] = useState<MenuItem | null>(null);
   const [promotingItem, setPromotingItem] = useState<MenuItem | null>(null);
@@ -456,10 +588,16 @@ export function AdminApp() {
   const [recoveringPassword, setRecoveringPassword] = useState(false);
   const [adminChecked, setAdminChecked] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>({ ordering_open: true, hero_message: "Fresh home-style food, prepared with care and delivered to your door.", upi_id: "krsnasolo@okicici", merchant_name: "Neeru's Home Kitchen", order_cutoff: "", whatsapp_number: "918684000013", announcement_enabled: false, announcement_title: "", announcement_message: "", announcement_image_path: "" });
+  const [phonePushStatus, setPhonePushStatus] = useState<PhonePushStatus>("checking");
+  const [storeSettings, setStoreSettings] = useState<AdminStoreSettings>(() => normalizeStorefrontSettings({}));
   const knownActionIds = useRef<Set<string> | null>(null);
+  const shownReminderIds = useRef(new Set<string>());
   const alertAudioContext = useRef<AudioContext | null>(null);
   const soundEnabledRef = useRef(soundEnabled);
+  const activeDateWindow = useMemo(
+    () => orderDateWindow(selectedDate, reviewRange, customReviewFrom, customReviewTo),
+    [selectedDate, reviewRange, customReviewFrom, customReviewTo],
+  );
 
   useEffect(() => {
     if (!supabase) return;
@@ -488,6 +626,16 @@ export function AdminApp() {
   }, [session]);
 
   useEffect(() => {
+    let active = true;
+    if (!session || !isAdmin) {
+      setPhonePushStatus("checking");
+      return () => { active = false; };
+    }
+    void getPhonePushStatus().then((status) => { if (active) setPhonePushStatus(status); }).catch(() => { if (active) setPhonePushStatus("setup-required"); });
+    return () => { active = false; };
+  }, [session, isAdmin]);
+
+  useEffect(() => {
     localStorage.setItem("neeru-text-size", large ? "large" : "standard");
   }, [large]);
 
@@ -495,7 +643,7 @@ export function AdminApp() {
     localStorage.setItem("neeru-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !customerHistory && !menuAdding && !menuEditing && !promotingItem && !categoryAdding && !categoryEditing && !promotingCategory && !deletingOrder && !deliveringOrder;
+  const canApplyAppUpdate = screen === "orders" && !adding && !editing && !editingCustomer && !customerHistory && !menuAdding && !menuEditing && !promotingItem && !categoryAdding && !categoryEditing && !promotingCategory && !deletingOrder && !deliveringOrder;
   useEffect(() => {
     if (import.meta.env.DEV) return;
     const currentAsset = Array.from(document.scripts)
@@ -559,15 +707,21 @@ export function AdminApp() {
     });
   }
 
+  function playAlertSound() {
+    const context = ensureAlertAudio();
+    if (context.state === "running") {
+      soundAlert(context);
+      return;
+    }
+    void context.resume().then(() => soundAlert(context)).catch(() => undefined);
+  }
+
   function toggleAlertSound() {
     const next = !soundEnabledRef.current;
     soundEnabledRef.current = next;
     setSoundEnabled(next);
     localStorage.setItem("neeru-admin-alert-sound", next ? "on" : "off");
-    if (next) {
-      const context = ensureAlertAudio();
-      window.setTimeout(() => soundAlert(context), 40);
-    }
+    if (next) playAlertSound();
   }
 
   useEffect(() => {
@@ -578,13 +732,36 @@ export function AdminApp() {
     return () => window.removeEventListener("pointerdown", unlock);
   }, [soundEnabled]);
 
+  useEffect(() => {
+    const checkReminders = () => {
+      const now = new Date();
+      const currentDate = dateKey(now);
+      const due = orders.find((order) => {
+        if (order.stage === "delivered" || order.order_date !== currentDate || !order.reminder_time) return false;
+        const reminderAt = new Date(`${order.order_date}T${order.reminder_time.slice(0, 5)}:00`);
+        const key = `${order.id}:${order.reminder_time}`;
+        return !shownReminderIds.current.has(key) && now.getTime() >= reminderAt.getTime() && now.getTime() - reminderAt.getTime() <= 5 * 60_000;
+      });
+      if (!due?.reminder_time) return;
+      const key = `${due.id}:${due.reminder_time}`;
+      shownReminderIds.current.add(key);
+      setNotice(`Reminder: ${due.customer_name}'s delivery is at ${due.delivery_time ? formatTime12(due.delivery_time) : "the scheduled time"}.`);
+      playAlertSound();
+    };
+    checkReminders();
+    const timer = window.setInterval(checkReminders, 30_000);
+    return () => window.clearInterval(timer);
+  }, [orders]);
+
   async function loadOrders() {
     if (!supabase) return;
     setLoading(true);
     const { data, error } = await supabase
       .from("orders")
       .select("*,order_items(id,menu_item_id,item_name,unit_price,quantity,unit_label)")
-      .eq("order_date", selectedDate)
+      .gte("order_date", activeDateWindow.from)
+      .lte("order_date", activeDateWindow.to)
+      .order("order_date")
       .order("delivery_time")
       .order("created_at");
     setLoading(false);
@@ -594,7 +771,7 @@ export function AdminApp() {
       const phones = new Map((profiles || []).map((profile) => [`${profile.full_name.trim().toLowerCase()}|${profile.flat_number.trim().toLowerCase()}`, profile.phone]));
       setOrders(((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map((rawOrder) => ({
         ...rawOrder,
-        customer_phone: phones.get(`${rawOrder.customer_name.trim().toLowerCase()}|${rawOrder.flat_number.trim().toLowerCase()}`) || "",
+        customer_phone: String(rawOrder.customer_phone || phones.get(`${rawOrder.customer_name.trim().toLowerCase()}|${rawOrder.flat_number.trim().toLowerCase()}`) || ""),
         stage: normalizeStage(rawOrder.stage),
         items: ((rawOrder as typeof rawOrder & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
           ...line,
@@ -606,12 +783,41 @@ export function AdminApp() {
     }
   }
 
+  async function loadPendingPayments() {
+    if (!supabase || !session) return;
+    setPendingPaymentsLoading(true);
+    const { data, error } = await supabase
+      .from("orders")
+      .select("*,order_items(id,menu_item_id,item_name,unit_price,quantity,unit_label)")
+      .or("is_paid.eq.false,is_paid.is.null")
+      .order("order_date", { ascending: true })
+      .order("created_at", { ascending: true });
+    setPendingPaymentsLoading(false);
+    if (error) {
+      setNotice(`Could not load pending payments: ${error.message}`);
+      return;
+    }
+    const { data: profiles } = await supabase.from("customer_profiles").select("full_name,flat_number,phone");
+    const phones = new Map((profiles || []).map((profile) => [`${profile.full_name.trim().toLowerCase()}|${profile.flat_number.trim().toLowerCase()}`, profile.phone]));
+    setPendingPayments(((data ?? []) as (Omit<Order, "stage"> & { stage: string })[]).map((rawOrder) => ({
+      ...rawOrder,
+        customer_phone: String(rawOrder.customer_phone || phones.get(`${rawOrder.customer_name.trim().toLowerCase()}|${rawOrder.flat_number.trim().toLowerCase()}`) || ""),
+      stage: normalizeStage(rawOrder.stage),
+      items: ((rawOrder as typeof rawOrder & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
+        ...line,
+        unit_price: Number(line.unit_price),
+        quantity: Number(line.quantity),
+        unit_label: line.unit_label || "portion",
+      })),
+    } as Order)));
+  }
+
   async function loadMenu() {
     if (!supabase || !session) return;
     const [{ data, error }, { data: daily }, { data: configuration }, categoryResult, categoryLinks] = await Promise.all([
       supabase.from("menu_items").select("*").order("is_active", { ascending: false }).order("name"),
       supabase.from("daily_menu").select("menu_item_id,is_available,is_featured,portions_available,special_price,promotion_message,promotion_until").eq("menu_date", today()),
-      supabase.from("storefront_settings").select("ordering_open,hero_message,upi_id,merchant_name,order_cutoff,whatsapp_number,announcement_enabled,announcement_title,announcement_message,announcement_image_path").eq("id", 1).maybeSingle(),
+      supabase.from("storefront_settings").select("*").eq("id", 1).maybeSingle(),
       supabase.from("dish_categories").select("*").order("sort_order").order("name"),
       supabase.from("menu_item_categories").select("menu_item_id,category_id"),
     ]);
@@ -635,20 +841,23 @@ export function AdminApp() {
     );
     setMenuItems(resolved);
     if (!categoryResult.error) setDishCategories((categoryResult.data || []) as DishCategory[]);
-    if (configuration) setStoreSettings({ ...configuration, order_cutoff: configuration.order_cutoff?.slice(0, 5) || "" } as AdminStoreSettings);
+    if (configuration) setStoreSettings(normalizeStorefrontSettings({ ...configuration, order_cutoff: configuration.order_cutoff?.slice(0, 5) || "" }));
   }
 
   async function loadCustomers() {
     if (!supabase || !session) return;
-    const { data, error } = await supabase
-      .from("orders")
-      .select("customer_name,flat_number,customer_phone,delivered_by,created_at")
-      .order("created_at", { ascending: false })
-      .limit(500);
+    const [{ data, error }, { data: directoryData }] = await Promise.all([
+      supabase
+        .from("orders")
+        .select("customer_name,flat_number,customer_phone,delivered_by,created_at")
+        .order("created_at", { ascending: false })
+        .limit(500),
+      supabase.rpc("admin_customer_directory"),
+    ]);
     if (error) return;
     const unique = new Map<string, CustomerProfile>();
     for (const row of data ?? []) {
-      const key = String(row.customer_name).trim().toLowerCase();
+      const key = String(row.customer_phone || "").replace(/\D/g, "") || `${String(row.customer_name).trim().toLowerCase()}|${String(row.flat_number).trim().toLowerCase()}`;
       if (key && !unique.has(key)) {
         unique.set(key, {
           customer_name: String(row.customer_name),
@@ -658,22 +867,87 @@ export function AdminApp() {
         });
       }
     }
+    for (const customer of (directoryData || []) as CustomerDirectoryEntry[]) {
+      const key = String(customer.customer_phone || "").replace(/\D/g, "") || `${String(customer.customer_name).trim().toLowerCase()}|${String(customer.flat_number).trim().toLowerCase()}`;
+      if (key && !unique.has(key)) {
+        unique.set(key, {
+          customer_name: String(customer.customer_name),
+          customer_phone: String(customer.customer_phone || ""),
+          flat_number: String(customer.flat_number),
+          delivered_by: "nanny",
+        });
+      }
+    }
     setCustomers([...unique.values()]);
+  }
+
+  async function loadCustomerDirectory() {
+    if (!supabase || !session) return;
+    setCustomerDirectoryLoading(true);
+    setCustomerDirectoryError("");
+    const { data, error } = await supabase.rpc("admin_customer_directory");
+    setCustomerDirectoryLoading(false);
+    if (error) {
+      setCustomerDirectoryError(error.message);
+      return;
+    }
+    setCustomerDirectory(((data || []) as CustomerDirectoryEntry[]).map((entry) => ({
+      ...entry,
+      customer_phone: String(entry.customer_phone || ""),
+      order_count: Number(entry.order_count || 0),
+      total_spend: Number(entry.total_spend || 0),
+      paid_total: Number(entry.paid_total || 0),
+      pending_total: Number(entry.pending_total || 0),
+      delivered_count: Number(entry.delivered_count || 0),
+    })) as CustomerDirectoryEntry[]);
+  }
+
+  const openCustomerDetails = (customer: Pick<Order, "customer_name" | "flat_number" | "customer_phone">) => {
+    const saved = customerDirectory.find((entry) => entry.customer_key === customerKey(customer));
+    setEditingCustomer(saved || {
+      customer_key: customerKey(customer),
+      customer_name: customer.customer_name,
+      customer_phone: customer.customer_phone || "",
+      flat_number: customer.flat_number,
+      first_order_at: "",
+      last_order_at: "",
+      order_count: 0,
+      total_spend: 0,
+      paid_total: 0,
+      pending_total: 0,
+      delivered_count: 0,
+    });
+  };
+
+  async function saveCustomerDirectoryEntry(customer: CustomerDirectoryEntry, values: Pick<CustomerDirectoryEntry, "customer_name" | "flat_number" | "customer_phone">) {
+    if (!supabase) throw new Error("The shared database is not connected.");
+    const isNewClient = !customer.customer_key;
+    const { error } = await supabase.rpc("admin_update_customer_directory_entry", {
+      p_customer_phone: customer.customer_phone,
+      p_prior_name: customer.customer_name,
+      p_prior_flat_number: customer.flat_number,
+      p_customer_name: values.customer_name.trim(),
+      p_flat_number: values.flat_number.trim().toUpperCase(),
+      p_new_phone: values.customer_phone.replace(/\D/g, ""),
+    });
+    if (error) throw new Error(error.message);
+    setEditingCustomer(null);
+    setNotice(isNewClient ? `${values.customer_name.trim()} was added to the client list.` : `${values.customer_name.trim()}'s client details were updated across their order history.`);
+    await Promise.all([loadCustomerDirectory(), loadCustomers(), loadOrders(), loadPendingPayments()]);
   }
 
   async function openCustomerHistory(order: Pick<Order, "customer_name" | "flat_number" | "customer_phone">) {
     if (!supabase) return;
     setCustomerHistory({ customer_name: order.customer_name, flat_number: order.flat_number, orders: [], admin_remarks: "", customer_phone: order.customer_phone || "" });
     setCustomerHistoryLoading(true);
-    const [ordersResult, noteResult, profileResult] = await Promise.all([
-      supabase
+    const historyOrders = supabase
       .from("orders")
-      .select("id,created_at,order_date,order_details,delivery_time,amount,stage,is_paid,payment_status,payment_method,delivered_by,remarks,customer_name,flat_number,photo_path")
-      .eq("customer_name", order.customer_name)
-      .eq("flat_number", order.flat_number)
+      .select("id,created_at,order_date,order_details,delivery_time,amount,stage,is_paid,payment_status,payment_method,delivered_by,remarks,customer_name,customer_phone,flat_number,photo_path,order_items(id,menu_item_id,item_name,unit_price,quantity,unit_label)")
       .order("order_date", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(1000),
+      .limit(1000);
+    const [ordersResult, noteResult, profileResult] = await Promise.all([
+      order.customer_phone ? historyOrders.eq("customer_phone", order.customer_phone.replace(/\D/g, "")) : historyOrders.eq("customer_name", order.customer_name).eq("flat_number", order.flat_number),
       supabase.from("customer_admin_notes").select("remarks").eq("customer_name", order.customer_name).eq("flat_number", order.flat_number).maybeSingle(),
       supabase.from("customer_profiles").select("phone").eq("full_name", order.customer_name).eq("flat_number", order.flat_number).maybeSingle(),
     ]);
@@ -686,9 +960,18 @@ export function AdminApp() {
     setCustomerHistory({
       customer_name: order.customer_name,
       flat_number: order.flat_number,
-      orders: ((ordersResult.data || []) as (Omit<Order, "stage"> & { stage: string })[]).map((entry) => ({ ...entry, stage: normalizeStage(entry.stage) } as Order)),
+      orders: ((ordersResult.data || []) as (Omit<Order, "stage"> & { stage: string })[]).map((entry) => ({
+        ...entry,
+        stage: normalizeStage(entry.stage),
+        items: ((entry as typeof entry & { order_items?: OrderLine[] }).order_items || []).map((line) => ({
+          ...line,
+          quantity: Number(line.quantity),
+          unit_price: Number(line.unit_price),
+          unit_label: line.unit_label || "portion",
+        })),
+      } as Order)),
       admin_remarks: noteResult.data?.remarks || "",
-      customer_phone: profileResult.data?.phone || "",
+      customer_phone: String((ordersResult.data || []).find((entry) => entry.customer_phone)?.customer_phone || profileResult.data?.phone || order.customer_phone || ""),
     });
   }
 
@@ -722,22 +1005,23 @@ export function AdminApp() {
           unit_label: line.unit_label || "portion",
         })),
       } as Order));
-    const nextIds = new Set(onlineOrders.map((order) => `order:${order.id}`));
+    const nextIds = new Set(onlineOrders.map((order) => `order:${order.id}:${order.payment_status || "pending"}:${order.payment_reference || ""}`));
     const hasNewAction = knownActionIds.current
       ? [...nextIds].some((id) => !knownActionIds.current?.has(id))
       : false;
     knownActionIds.current = nextIds;
     setNotificationOrders(onlineOrders);
-    if (announceNew && hasNewAction) soundAlert();
+    if (announceNew && hasNewAction) playAlertSound();
   }
 
   useEffect(() => {
     loadOrders();
-  }, [selectedDate, session]);
+  }, [activeDateWindow, session]);
   useEffect(() => {
     loadMenu();
     loadCustomers();
     loadActionCenter(false);
+    loadPendingPayments();
   }, [session]);
   useEffect(() => {
     if (!supabase || !session) return;
@@ -745,7 +1029,7 @@ export function AdminApp() {
     const channel = client
       .channel("kitchen-action-centre")
       .on("postgres_changes", { event: "*", schema: "public", table: "customer_profiles" }, () => loadActionCenter(true))
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => loadActionCenter(true))
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => { loadActionCenter(true); loadPendingPayments(); })
       .subscribe();
     const refresh = window.setInterval(() => loadActionCenter(true), 20_000);
     return () => {
@@ -759,7 +1043,7 @@ export function AdminApp() {
       .channel("kitchen-orders")
       .on(
         "postgres_changes",
-        { event: "*", schema: "public", table: "orders", filter: `order_date=eq.${selectedDate}` },
+        { event: "*", schema: "public", table: "orders" },
         loadOrders,
       )
       .subscribe();
@@ -768,27 +1052,83 @@ export function AdminApp() {
       window.clearInterval(refresh);
       supabase?.removeChannel(channel);
     };
-  }, [selectedDate, session]);
+  }, [activeDateWindow, session]);
+  // Keep every family desk current even when it has been left open. Realtime
+  // covers orders, while this light visible-only refresh also catches menu,
+  // storefront settings and category edits made from another admin device.
+  useEffect(() => {
+    if (!supabase || !session) return;
+    const refreshSharedData = () => {
+      if (document.visibilityState !== "visible") return;
+      void loadMenu();
+      void loadCustomers();
+      void loadPendingPayments();
+    };
+    const timer = window.setInterval(refreshSharedData, 30_000);
+    window.addEventListener("focus", refreshSharedData);
+    document.addEventListener("visibilitychange", refreshSharedData);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshSharedData);
+      document.removeEventListener("visibilitychange", refreshSharedData);
+    };
+  }, [session]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return orders.filter((order) => {
       const matchesDelivery = deliveryFilter === "all" || order.delivered_by === deliveryFilter;
+      const matchesFulfillment = fulfillmentFilter === "all" || order.stage === fulfillmentFilter;
       const matchesSearch = !q || `${order.customer_name} ${order.flat_number} ${order.order_details}`.toLowerCase().includes(q);
-      return matchesDelivery && matchesSearch;
+      return matchesDelivery && matchesFulfillment && matchesSearch;
     });
-  }, [orders, search, deliveryFilter]);
+  }, [orders, search, deliveryFilter, fulfillmentFilter]);
+  const visibleCustomers = useMemo(() => {
+    const query = customerDirectorySearch.trim().toLowerCase();
+    const matches = customerDirectory.filter((customer) => {
+      const matchesSearch = !query || `${customer.customer_name} ${customer.flat_number} ${customer.customer_phone}`.toLowerCase().includes(query);
+      const matchesTower = customerDirectorySort !== "tower" || !customerDirectoryTower || customer.flat_number.toUpperCase().startsWith(`${customerDirectoryTower}-`);
+      return matchesSearch && matchesTower;
+    });
+    return [...matches].sort((left, right) => {
+      if (customerDirectorySort === "spend-asc") return left.total_spend - right.total_spend || left.customer_name.localeCompare(right.customer_name);
+      if (customerDirectorySort === "recent") return String(right.last_order_at).localeCompare(String(left.last_order_at));
+      if (customerDirectorySort === "name") return left.customer_name.localeCompare(right.customer_name);
+      if (customerDirectorySort === "tower") return left.flat_number.localeCompare(right.flat_number, undefined, { numeric: true }) || left.customer_name.localeCompare(right.customer_name);
+      if (customerDirectorySort === "pending") return right.pending_total - left.pending_total || right.total_spend - left.total_spend;
+      return right.total_spend - left.total_spend || right.order_count - left.order_count;
+    });
+  }, [customerDirectory, customerDirectorySearch, customerDirectorySort, customerDirectoryTower]);
+  const customerDirectoryStats = useMemo(() => ({
+    clients: customerDirectory.length,
+    totalSpend: customerDirectory.reduce((sum, customer) => sum + customer.total_spend, 0),
+    averageSpend: customerDirectory.length ? customerDirectory.reduce((sum, customer) => sum + customer.total_spend, 0) / customerDirectory.length : 0,
+    pending: customerDirectory.reduce((sum, customer) => sum + customer.pending_total, 0),
+  }), [customerDirectory]);
   const stats = useMemo(
     () => ({
-      total: orders.length,
-      amount: orders.reduce((n, o) => n + Number(o.amount), 0),
-      paid: orders.filter((o) => o.is_paid).reduce((n, o) => n + Number(o.amount), 0),
-      nanny: orders.filter((o) => o.delivered_by === "nanny").length,
-      others: orders.filter((o) => o.delivered_by === "others").length,
+      total: filtered.length,
+      amount: filtered.reduce((n, o) => n + Number(o.amount), 0),
+      paid: filtered.filter((o) => o.is_paid).reduce((n, o) => n + Number(o.amount), 0),
+      nanny: filtered.filter((o) => o.delivered_by === "nanny").length,
+      others: filtered.filter((o) => o.delivered_by === "others").length,
     }),
-    [orders],
+    [filtered],
   );
-  const draft = adding ? emptyDraft(selectedDate) : editing;
+  const reviewRangeLabel = reviewRange === "7" ? "Last 7 days" : reviewRange === "15" ? "Last 15 days" : reviewRange === "30" ? "Last 30 days" : reviewRange === "year" ? "This year" : reviewRange === "custom" ? "Selected range" : "Day";
+  // The selected date is the page context; adding "Orders for" made this read
+  // like a second page title beside "Daily operations".
+  const ordersHeading = reviewRange === "day"
+    ? (selectedDate === today() ? "Today" : fullDateLabel(selectedDate))
+    : `Review: ${reviewRangeLabel}`;
+  const ordersDescription = reviewRange === "day"
+    ? ""
+    : `Showing orders from ${dateLabel(activeDateWindow.from)} to ${dateLabel(activeDateWindow.to)}.`;
+  const emptyOrderMessage = reviewRange === "day" ? "No orders for this day" : "No orders in this review period";
+  const emptyOrderHelp = reviewRange === "day" ? "Add the first order when the phone rings." : "Try another review period or choose a different end date.";
+  const draft = adding ? { ...emptyDraft(newOrderPrefill?.order_date || selectedDate), ...newOrderPrefill } : editing;
+  const promotedItemCategory = promotingItem ? dishCategories.find((category) => (promotingItem.category_ids || [promotingItem.category_id]).includes(category.id) && category.is_active) : undefined;
+  const promotedItemCategoryDishCount = promotedItemCategory ? menuItems.filter((candidate) => candidate.is_active && (candidate.category_ids || [candidate.category_id]).includes(promotedItemCategory.id)).length : 0;
 
   async function uploadPhoto(photo: File, purpose: "orders" | "menu" | "banner" | "payment") {
     if (!session) throw new Error("Please sign in again before uploading a photo.");
@@ -812,6 +1152,12 @@ export function AdminApp() {
     if (!supabase) return setNotice("Add your Supabase publishable key to .env.local first.");
     if (!values.customer_name || !values.flat_number || !values.order_details) {
       return setNotice("Please fill customer name, flat number, and order.");
+    }
+    if (!addingItems && !/^[6-9]\d{9}$/.test((values.customer_phone || "").replace(/\D/g, ""))) {
+      return setNotice("Add the client’s 10-digit mobile number before saving this order.");
+    }
+    if (values.reminder_time && !values.delivery_time) {
+      return setNotice("Choose a delivery time before setting a reminder.");
     }
     const structuredItems = (values.items || [])
       .filter((line) => line.menu_item_id && line.quantity > 0)
@@ -837,6 +1183,7 @@ export function AdminApp() {
       photo_path: photoPath,
       amount: structuredItems.length ? structuredTotal : Number(values.amount),
       delivery_time: values.delivery_time || null,
+      ...(values.reminder_time ? { reminder_time: values.reminder_time, reminder_offset_minutes: values.reminder_offset_minutes || null } : {}),
       delivered_by: values.delivered_by,
       is_paid: values.is_paid,
       stage: normalizeStage(values.stage),
@@ -884,9 +1231,11 @@ export function AdminApp() {
         }
       }
       setAdding(false);
+      setAddingItems(false);
+      setNewOrderPrefill(null);
       setEditing(null);
       setScreen("orders");
-      setNotice("Order saved successfully.");
+      setNotice(addingItems ? "Extra dishes added to this order." : "Order saved successfully.");
       loadOrders();
       loadCustomers();
     }
@@ -1181,10 +1530,10 @@ export function AdminApp() {
     const cutoffTime = ceilTimeToQuarter(values.until);
     const deliveryTime = ceilTimeToQuarter(values.deliveryTime);
     const sharedCategory = values.includeCategory
-      ? dishCategories.find((category) => category.id === item.category_id && category.is_active)
+      ? dishCategories.find((category) => (item.category_ids || [item.category_id]).includes(category.id) && category.is_active)
       : undefined;
     const categoryItems = sharedCategory
-      ? menuItems.filter((candidate) => candidate.is_active && candidate.category_id === sharedCategory.id)
+      ? menuItems.filter((candidate) => candidate.is_active && (candidate.category_ids || [candidate.category_id]).includes(sharedCategory.id))
       : [];
     const daily = {
       menu_item_id: item.id,
@@ -1212,7 +1561,7 @@ export function AdminApp() {
     if (error) throw new Error(`Could not save today’s promotion: ${error.message}`);
     const price = Number(values.specialPrice ?? item.price);
     const lines = [
-      "❤️ *Neeru’s Home Kitchen*",
+      "*Neeru’s Home Kitchen*",
       "",
       `🍲 *${item.name}*`,
       "",
@@ -1222,6 +1571,13 @@ export function AdminApp() {
     ];
     if (values.specialPrice !== null && Number(values.specialPrice) < Number(item.price)) lines.push(`Regular price: ${money(item.price)}`);
     if (values.portions !== null) lines.push(values.portions > 0 ? `Only ${values.portions} portions available` : "Sold out for today");
+    if (sharedCategory && categoryItems.length > 1) {
+      lines.push("", `*Also available in ${sharedCategory.name}:*`, "", ...categoryItems.filter((candidate) => candidate.id !== item.id).flatMap((candidate) => [
+        `*${candidate.name}* – ${money(Number(candidate.daily?.special_price ?? candidate.price))} / portion${portionSummary(candidate.unit_label)}`,
+        candidate.description || "Made fresh after you order.",
+        "",
+      ]));
+    }
     const timingLines = promotionTimingLines(values.deliveryDate, deliveryTime, cutoffTime);
     if (timingLines.length) lines.push("", ...timingLines);
     lines.push("", "Made fresh after you order, so every portion is prepared just for you.");
@@ -1266,7 +1622,7 @@ export function AdminApp() {
     const { error } = await supabase.from("daily_menu").upsert(dailyRows, { onConflict: "menu_item_id,menu_date" });
     if (error) throw new Error(`Could not prepare the category menu: ${error.message}`);
     const lines = [
-      "❤️ *Neeru’s Home Kitchen*",
+      "*Neeru’s Home Kitchen*",
       "",
       `🍽️ *${category.name} Menu*`,
       "",
@@ -1322,9 +1678,11 @@ export function AdminApp() {
 
   async function saveStoreSettings(settings: AdminStoreSettings) {
     if (!supabase) return;
-    const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...settings, order_cutoff: settings.order_cutoff || null });
+    const announcementEnabled = settings.show_banner_image || settings.show_customer_message || settings.show_announcement_title || settings.show_announcement_message;
+    const nextSettings = { ...settings, announcement_enabled: announcementEnabled };
+    const { error } = await supabase.from("storefront_settings").upsert({ id: 1, ...nextSettings, order_cutoff: nextSettings.order_cutoff || null });
     if (error) setNotice(`Could not save storefront: ${error.message}`);
-    else { setStoreSettings(settings); setNotice("Customer storefront settings saved."); }
+    else { setStoreSettings(nextSettings); setNotice("Customer storefront settings saved."); }
   }
 
   async function savePaymentSettings(values: PaymentSettingsUpdate, qrPhoto?: File) {
@@ -1422,6 +1780,7 @@ export function AdminApp() {
       setOrders((current) => current.map((order) => order.id === id ? { ...order, ...record, stage: normalizeStage(data.stage) } as Order : order));
       if (isDelivering) setNotice(currentOrder?.photo_path ? "Marked delivered. The temporary photo was deleted and verified first." : "Marked delivered. No temporary photo was attached.");
       loadOrders();
+      loadPendingPayments();
       return true;
     }
   }
@@ -1477,23 +1836,105 @@ export function AdminApp() {
   }
 
   const requestOrderDeletion = (order: Order) => {
+    setAddingItems(false);
+    setNewOrderPrefill(null);
     setEditing(null);
     setDeletingOrder(order);
   };
 
   const openNewOrder = () => {
+    setAddingItems(false);
+    setNewOrderPrefill(null);
     setEditing(null);
     setAdding(true);
   };
   const openExistingOrder = (order: Order) => {
     sessionStorage.removeItem("neeru-prefill");
+    setAddingItems(false);
+    setNewOrderPrefill(null);
     setAdding(false);
     setEditing(order);
+  };
+  const openAddItems = (order: Order) => {
+    sessionStorage.removeItem("neeru-prefill");
+    setAdding(false);
+    setAddingItems(true);
+    setNewOrderPrefill(null);
+    setEditing(order);
+  };
+  const openNewOrderForCustomer = (order: Order) => {
+    sessionStorage.removeItem("neeru-prefill");
+    setAddingItems(false);
+    setEditing(null);
+    setNewOrderPrefill({
+      order_date: order.order_date,
+      customer_name: order.customer_name,
+      customer_phone: order.customer_phone || "",
+      flat_number: order.flat_number,
+      delivery_time: order.delivery_time || "",
+      delivered_by: order.delivered_by,
+      remarks: order.remarks || "",
+    });
+    setAdding(true);
   };
   const openScreen = (next: Screen) => {
     setNotificationsOpen(false);
     setScreen(next);
+    if (next === "clients") void loadCustomerDirectory();
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const sharePaymentNote = async (requestedOrders: Order[], channel: "share" | "whatsapp" = "share") => {
+    const selected = requestedOrders.filter((order) => !order.is_paid && order.payment_status !== "verified");
+    if (!selected.length) return setNotice("Choose at least one unpaid online-payment order first.");
+    if (selected.some((order) => order.payment_method === "cash")) return setNotice("Cash or hand-payment orders stay separate, so remove them before sharing an online payment note.");
+    if (new Set(selected.map(customerKey)).size !== 1) return setNotice("Choose orders for one customer at a time so the payment note stays clear.");
+    if (!storeSettings.upi_id) return setNotice("Add the kitchen UPI ID in Settings before sharing a payment note.");
+    if (!supabase) return setNotice("The shared database is not connected.");
+    const { data, error } = await supabase.rpc("create_payment_note_request", { p_order_ids: selected.map((order) => order.id) });
+    if (error || !data) return setNotice(`Could not prepare the payment note: ${error?.message || "please try again"}`);
+    const request = data as PaymentNoteRequest;
+    const text = paymentNoteText(selected, request.share_code, channel === "whatsapp" ? "whatsapp" : "plain");
+    try {
+      if (channel === "whatsapp") {
+        const digits = (selected[0]?.customer_phone || "").replace(/\D/g, "");
+        const international = digits.length === 10 ? `91${digits}` : digits;
+        window.open(`https://wa.me/${international}?text=${encodeURIComponent(text)}`, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (navigator.share) {
+        await navigator.share({ title: "Neeru's Home Kitchen · payment details", text });
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setNotice("Payment note copied. Paste it into WhatsApp, Messages, or any social app.");
+    } catch (error) {
+      if ((error as DOMException | undefined)?.name !== "AbortError") setNotice("Could not open sharing. Please try again.");
+    }
+  };
+  const shareDeliveryReminder = async (order: Order) => {
+    if (!order.delivery_time) return setNotice("Set a delivery time before sending a delivery reminder.");
+    const text = deliveryReminderText(order);
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "Neeru's Home Kitchen · delivery reminder", text });
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      setNotice("Delivery reminder copied. Paste it into WhatsApp, Messages, or any social app.");
+    } catch (error) {
+      if ((error as DOMException | undefined)?.name !== "AbortError") setNotice("Could not open sharing. Please try again.");
+    }
+  };
+  const turnOnPhonePush = async () => {
+    if (!session) throw new Error("Please sign in again before turning on phone alerts.");
+    await enablePhonePush(session.user.id);
+    setPhonePushStatus("enabled");
+    return "Phone alerts are on for this device. Delivery reminders will appear even when the app is in the background or closed.";
+  };
+  const turnOffPhonePush = async () => {
+    await disablePhonePush();
+    setPhonePushStatus("ready");
+    return "Phone alerts are off for this device.";
   };
   const notificationCount = notificationOrders.length;
   const openNotificationOrder = (order: Order) => {
@@ -1501,7 +1942,6 @@ export function AdminApp() {
     setAdding(false);
     setSelectedDate(order.order_date);
     setScreen("orders");
-    setActiveStage("new");
     setEditing(order);
   };
 
@@ -1560,8 +2000,17 @@ export function AdminApp() {
                 }}
                 onClose={() => setNotificationsOpen(false)}
                 onToggleSound={toggleAlertSound}
+                onTestSound={playAlertSound}
                 onOpenOrder={openNotificationOrder}
               />
+              <button
+                className={`icon-button client-directory-button ${screen === "clients" ? "active" : ""}`}
+                onClick={() => openScreen("clients")}
+                title="Client directory"
+                aria-label="Open client directory"
+              >
+                <UsersRound size={20} />
+              </button>
               <button className="icon-button text-size" onClick={() => openScreen("settings")} title="Open settings">
                 <Settings size={20} />
                 <span>Settings</span>
@@ -1583,11 +2032,11 @@ export function AdminApp() {
 
           {screen === "orders" ? (
             <>
-              <section className="page-heading">
+              <section className="page-heading orders-heading">
                 <div>
                   <span className="eyebrow">DAILY OPERATIONS</span>
-                  <h1>Today’s orders</h1>
-                  <p>Track every meal from request to delivery.</p>
+                  <h1>{ordersHeading}</h1>
+                  {ordersDescription && <p>{ordersDescription}</p>}
                 </div>
                 <button className="primary desktop-add" onClick={openNewOrder}><Plus size={20} /> New order</button>
               </section>
@@ -1606,7 +2055,21 @@ export function AdminApp() {
                 {selectedDate !== today() && <button className="today" onClick={() => setSelectedDate(today())}>Go to today</button>}
               </section>
 
-              <section className="summary" aria-label="Daily summary">
+              <section className="order-review-controls" aria-label="Choose orders to review">
+                <span>Review</span>
+                <div className="review-range-buttons" role="group" aria-label="Order review period">
+                  {(["day", "7", "15", "30", "year", "custom"] as OrderReviewRange[]).map((range) => {
+                    const label = range === "day" ? "Day" : range === "7" ? "Last 7 days" : range === "15" ? "Last 15 days" : range === "30" ? "Last 30 days" : range === "year" ? "This year" : "Custom range";
+                    return <button key={range} className={reviewRange === range ? "active" : ""} aria-pressed={reviewRange === range} onClick={() => setReviewRange(range)}>{label}</button>;
+                  })}
+                </div>
+                {reviewRange === "custom" && <div className="review-custom-dates">
+                  <label>From<input type="date" value={customReviewFrom} max={customReviewTo || undefined} onChange={(event) => setCustomReviewFrom(event.target.value)} /></label>
+                  <label>To<input type="date" value={customReviewTo} min={customReviewFrom || undefined} onChange={(event) => setCustomReviewTo(event.target.value)} /></label>
+                </div>}
+              </section>
+
+              <section className="summary" aria-label="Order summary">
                 <Stat label="Orders" value={stats.total} icon={<UtensilsCrossed />} />
                 <Stat label="Revenue" value={money(stats.amount)} icon={<IndianRupee />} />
                 <Stat label="Collected" value={money(stats.paid)} tone="good" icon={<Check />} />
@@ -1632,19 +2095,43 @@ export function AdminApp() {
                 </div>
               </section>
 
+              <section className="order-state-filter" aria-label="Filter order status">
+                <button className={fulfillmentFilter === "all" ? "active" : ""} aria-pressed={fulfillmentFilter === "all"} onClick={() => setFulfillmentFilter("all")}><UtensilsCrossed /> <span>All orders</span><b>{orders.length}</b></button>
+                <button className={fulfillmentFilter === "new" ? "active" : ""} aria-pressed={fulfillmentFilter === "new"} onClick={() => setFulfillmentFilter("new")}><DeliveryScooter /> <span>To deliver</span><b>{orders.filter((order) => order.stage === "new").length}</b></button>
+                <button className={fulfillmentFilter === "delivered" ? "active" : ""} aria-pressed={fulfillmentFilter === "delivered"} onClick={() => setFulfillmentFilter("delivered")}><Check /> <span>Delivered</span><b>{orders.filter((order) => order.stage === "delivered").length}</b></button>
+                <button className="payment-due-filter" title="Shows unpaid orders from all dates" onClick={() => setPaymentDeskOpen(true)}><IndianRupee /> <span>Payment due</span><b>{pendingPaymentsLoading ? "…" : pendingPayments.length}</b></button>
+              </section>
+
               {!supabase && <div className="setup">Setup needed: add the Supabase key in <code>.env.local</code>.</div>}
               {loading ? (
                 <div className="empty"><span className="loader" /><strong>Loading orders…</strong></div>
               ) : filtered.length === 0 ? (
-                <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : "No orders for this day"}</strong><span>{search ? "Try a different customer, flat or food." : deliveryFilter !== "all" ? "Choose All to see every order for this day." : "Add the first order when the phone rings."}</span>{!search && deliveryFilter === "all" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
+                <div className="empty"><span className="empty-icon"><UtensilsCrossed /></span><strong>{search ? "No matching orders" : fulfillmentFilter === "new" ? "Nothing waiting for delivery" : fulfillmentFilter === "delivered" ? "No delivered orders in this period" : deliveryFilter !== "all" ? `No orders assigned to ${deliveryFilter === "nanny" ? "Nanny" : "Others"}` : emptyOrderMessage}</strong><span>{search ? "Try a different customer, flat or food." : fulfillmentFilter !== "all" ? "Choose All orders to review every delivery state." : deliveryFilter !== "all" ? "Choose All to see every order in this period." : emptyOrderHelp}</span>{!search && deliveryFilter === "all" && fulfillmentFilter !== "delivered" && <button className="secondary" onClick={openNewOrder}><Plus size={18} /> Add order</button>}</div>
               ) : view === "board" ? (
-                <Board orders={filtered} activeStage={activeStage} onStage={setActiveStage} onEdit={openExistingOrder} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} onDeliver={setDeliveringOrder} />
+                <Board orders={filtered} fulfillmentFilter={fulfillmentFilter} onEdit={openExistingOrder} onEditCustomer={openCustomerDetails} onAddItems={openAddItems} onNewOrderForCustomer={openNewOrderForCustomer} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} onDeliver={setDeliveringOrder} onShareDeliveryReminder={shareDeliveryReminder} />
               ) : (
-                <OrderList orders={filtered} onEdit={openExistingOrder} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
+                <OrderList orders={filtered} onEdit={openExistingOrder} onEditCustomer={openCustomerDetails} onOpenCustomer={openCustomerHistory} onUpdate={updateOrder} onDelete={requestOrderDeletion} />
               )}
             </>
+          ) : screen === "clients" ? (
+            <ClientDirectoryScreen
+              customers={visibleCustomers}
+              totalCustomers={customerDirectory.length}
+              stats={customerDirectoryStats}
+              loading={customerDirectoryLoading}
+              error={customerDirectoryError}
+              search={customerDirectorySearch}
+              sort={customerDirectorySort}
+              tower={customerDirectoryTower}
+              onSearch={setCustomerDirectorySearch}
+              onSort={(value) => { setCustomerDirectorySort(value); if (value !== "tower") setCustomerDirectoryTower(""); }}
+              onTower={setCustomerDirectoryTower}
+              onOpenHistory={openCustomerHistory}
+              onEdit={setEditingCustomer}
+              onAdd={() => setEditingCustomer({ customer_key: "", customer_name: "", customer_phone: "", flat_number: "", first_order_at: "", last_order_at: "", order_count: 0, total_spend: 0, paid_total: 0, pending_total: 0, delivered_count: 0 })}
+            />
           ) : screen === "menu" ? (
-            <MenuScreen items={menuItems} categories={dishCategories} settings={storeSettings} onSaveSettings={saveStoreSettings} onUploadBanner={async (file) => uploadPhoto(file, "banner")} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onAddCategory={() => setCategoryAdding(true)} onEditCategory={setCategoryEditing} onPromoteCategory={setPromotingCategory} onToggleCategory={toggleDishCategory} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
+            <MenuScreen items={menuItems} categories={dishCategories} settings={storeSettings} onSaveSettings={saveStoreSettings} onUploadBanner={async (file) => uploadPhoto(file, "banner")} onDaily={updateDailyMenu} onAdd={() => setMenuAdding(true)} onEdit={setMenuEditing} onPromote={setPromotingItem} onToggleArchive={toggleMenuItem} onAddCategory={() => setCategoryAdding(true)} onEditCategory={setCategoryEditing} onPromoteCategory={setPromotingCategory} onToggleCategory={toggleDishCategory} onShowAll={() => setAllDailyMenu(true)} onHideAll={() => setAllDailyMenu(false)} onRepeatYesterday={repeatYesterdayMenu} onOrder={(item) => { setScreen("orders"); setEditing(null); setAddingItems(false); setNewOrderPrefill(null); setAdding(true); sessionStorage.setItem("neeru-prefill", JSON.stringify(item)); }} />
           ) : (
             <SettingsScreen
               large={large}
@@ -1655,6 +2142,7 @@ export function AdminApp() {
               paymentSettings={storeSettings}
               storefrontSettings={storeSettings}
               whatsappNumber={storeSettings.whatsapp_number}
+              phonePushStatus={phonePushStatus}
               onLarge={setLarge}
               onDark={setDark}
               onSaveStorefront={saveStoreSettings}
@@ -1667,7 +2155,10 @@ export function AdminApp() {
               onSavePayment={savePaymentSettings}
               onRemovePaymentQr={removePaymentQr}
               onSaveCustomerContact={saveCustomerContact}
+              onEnablePhonePush={turnOnPhonePush}
+              onDisablePhonePush={turnOffPhonePush}
               onUpdateAccount={updateAdminAccount}
+              onRefresh={() => window.location.replace(`/admin?updated=${Date.now()}`)}
               onSignOut={() => supabase?.auth.signOut()}
             />
           )}
@@ -1681,20 +2172,24 @@ export function AdminApp() {
 
         {draft && (
           <OrderForm
-            key={editing?.id ?? `new-${adding}`}
+            key={editing?.id ? `${editing.id}-${addingItems ? "add-items" : "edit"}` : `new-${adding}-${newOrderPrefill?.customer_phone || newOrderPrefill?.customer_name || "blank"}`}
             draft={draft}
+            addingItems={addingItems}
             menuItems={menuItems}
+            categories={dishCategories}
             customers={customers}
-            onClose={() => { setAdding(false); setEditing(null); sessionStorage.removeItem("neeru-prefill"); }}
+            onClose={() => { setAdding(false); setAddingItems(false); setNewOrderPrefill(null); setEditing(null); sessionStorage.removeItem("neeru-prefill"); }}
             onSave={saveOrder}
             onDelete={editing ? () => requestOrderDeletion(editing) : undefined}
           />
         )}
         {deletingOrder && <DeleteOrderModal order={deletingOrder} busy={deleteBusy} onClose={() => { if (!deleteBusy) setDeletingOrder(null); }} onConfirm={(reason) => deleteOrder(deletingOrder, reason)} />}
         {deliveringOrder && <CompleteDeliveryModal order={deliveringOrder} busy={deliveryBusy} onClose={() => { if (!deliveryBusy) setDeliveringOrder(null); }} onConfirm={() => confirmOrderDelivery(deliveringOrder)} />}
-        {customerHistory && <CustomerHistoryModal history={customerHistory} loading={customerHistoryLoading} onSaveRemarks={saveCustomerRemarks} onClose={() => { if (!customerHistoryLoading) setCustomerHistory(null); }} />}
+        {customerHistory && <CustomerHistoryModal history={customerHistory} loading={customerHistoryLoading} onSaveRemarks={saveCustomerRemarks} onSharePaymentNote={sharePaymentNote} onShareWhatsAppPaymentNote={(orders) => sharePaymentNote(orders, "whatsapp")} onClose={() => { if (!customerHistoryLoading) setCustomerHistory(null); }} />}
+        {editingCustomer && <ClientDirectoryEditModal customer={editingCustomer} onClose={() => setEditingCustomer(null)} onSave={saveCustomerDirectoryEntry} />}
+        {paymentDeskOpen && <PendingPaymentsModal orders={pendingPayments} loading={pendingPaymentsLoading} onClose={() => setPaymentDeskOpen(false)} onSharePaymentNote={sharePaymentNote} onShareWhatsAppPaymentNote={(orders) => sharePaymentNote(orders, "whatsapp")} onMarkPaid={(order) => void updateOrder(order.id, { is_paid: true })} />}
         {(menuAdding || menuEditing) && <MenuItemForm item={menuEditing} categories={dishCategories} onClose={() => { setMenuAdding(false); setMenuEditing(null); }} onSave={saveMenuItem} />}
-        {promotingItem && <PromotionModal item={promotingItem} category={dishCategories.find((category) => category.id === promotingItem.category_id && category.is_active)} categoryDishCount={menuItems.filter((candidate) => candidate.is_active && candidate.category_id === promotingItem.category_id).length} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
+        {promotingItem && <PromotionModal item={promotingItem} category={promotedItemCategory} categoryDishCount={promotedItemCategoryDishCount} onClose={() => setPromotingItem(null)} onPrepare={prepareDishPromotion} />}
         {(categoryAdding || categoryEditing) && <CategoryForm category={categoryEditing} onClose={() => { setCategoryAdding(false); setCategoryEditing(null); }} onSave={saveDishCategory} />}
         {promotingCategory && <CategoryPromotionModal category={promotingCategory} items={menuItems.filter((item) => item.category_id === promotingCategory.id && item.is_active)} onClose={() => setPromotingCategory(null)} onPrepare={prepareCategoryPromotion} />}
       </div>
@@ -1702,7 +2197,7 @@ export function AdminApp() {
   );
 }
 
-function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, onClose, onToggleSound, onOpenOrder }: {
+function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, onClose, onToggleSound, onTestSound, onOpenOrder }: {
   open: boolean;
   count: number;
   orders: Order[];
@@ -1710,6 +2205,7 @@ function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, 
   onToggle: () => void;
   onClose: () => void;
   onToggleSound: () => void;
+  onTestSound: () => void;
   onOpenOrder: (order: Order) => void;
 }) {
   return (
@@ -1724,6 +2220,7 @@ function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, 
             <div><span>ACTION CENTRE</span><h2>{count ? `${count} waiting` : "All caught up"}</h2></div>
             <div>
               <button className={`notification-sound ${soundEnabled ? "active" : ""}`} onClick={onToggleSound} title={soundEnabled ? "Turn alert sound off" : "Turn alert sound on"}>{soundEnabled ? <Volume2 /> : <VolumeX />}<span>{soundEnabled ? "Sound on" : "Sound off"}</span></button>
+              {soundEnabled && <button className="notification-sound notification-sound-test" onClick={onTestSound} title="Play notification sound"><Volume2 /><span>Test</span></button>}
               <button className="notification-close" onClick={onClose} aria-label="Close notifications"><X /></button>
             </div>
           </div>
@@ -1733,7 +2230,7 @@ function AdminNotificationCenter({ open, count, orders, soundEnabled, onToggle, 
               <div className="notification-group-title"><span><ReceiptText /> New online orders</span><b>{orders.length}</b></div>
               {orders.map((order) => <button className="notification-item order-notification" key={order.id} onClick={() => onOpenOrder(order)}>
                 <span className="notification-item-icon"><UtensilsCrossed /></span>
-                <div className="notification-order-copy"><b>{order.customer_name} · Flat {order.flat_number}</b><OrderItemsSummary order={order} variant="list" /></div>
+                <div className="notification-order-copy"><b>{order.customer_name} · Flat {order.flat_number}</b><small>{order.payment_status === "submitted" ? "Payment reference submitted — review needed" : "New customer order"}</small><OrderItemsSummary order={order} variant="list" /></div>
                 <strong>{money(Number(order.amount))}<ChevronRight /></strong>
               </button>)}
             </div>}
@@ -1817,15 +2314,11 @@ function PasswordReset({ dark, onComplete }: { dark: boolean; onComplete: () => 
 }
 
 function LogoMark() {
-  return (
-    <span className="brand-mark" aria-hidden="true">
-      <svg viewBox="0 0 48 48" role="img">
-        <path className="logo-steam" d="M17 21c-3-3 2-5 0-9M24 21c-3-3 2-5 0-10M31 21c-3-3 2-5 0-9" />
-        <path className="logo-bowl" d="M10.5 25.5h27c-.8 8.2-6.1 12.5-13.5 12.5s-12.7-4.3-13.5-12.5Z" />
-        <path className="logo-rim" d="M8.5 25.5h31" />
-      </svg>
-    </span>
-  );
+  return <span className="brand-mark" aria-hidden="true"><img src="/neeru-logo.png" alt="" /></span>;
+}
+
+function DeliveryScooter({ size = 18 }: { size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="6" cy="18" r="2" /><circle cx="18" cy="18" r="2" /><path d="M6 18h7l2-6h-5l-2 3H5" /><path d="m15 12 1.5-6H14" /><path d="M11 12l2-3h3" /></svg>;
 }
 
 function Stat({ label, value, tone = "", icon, compact = false }: { label: string; value: string | number; tone?: string; icon?: React.ReactNode; compact?: boolean }) {
@@ -1837,119 +2330,280 @@ function StageBadge({ stage }: { stage: Stage }) {
 }
 function OrderItemsSummary({ order, variant = "card" }: { order: Order; variant?: "card" | "list" | "dialog" }) {
   const items = (order.items || []).filter((line) => line.quantity > 0 && line.item_name);
-  if (!items.length) return <p className={`order-items-fallback ${variant}`}>{order.order_details}</p>;
+  if (!items.length) {
+    // Older orders were saved as comma-separated text. Keep them just as easy
+    // to scan as newer itemized orders when viewing a customer's history.
+    const legacyItems = order.order_details.split(/,\s*/).map((item) => item.trim()).filter(Boolean);
+    if (variant === "dialog" && legacyItems.length) return <div className="order-items-summary dialog legacy-order-items" aria-label={`Order: ${order.order_details}`}>
+      {legacyItems.map((item, index) => <div className="legacy-order-item" key={`${item}-${index}`}><i /> <span>{item}</span></div>)}
+    </div>;
+    return <p className={`order-items-fallback ${variant}`}>{order.order_details}</p>;
+  }
   return (
     <div className={`order-items-summary ${variant}`} aria-label={`Order: ${order.order_details}`}>
       {items.map((line) => (
         <div className="order-item-line" key={line.id || line.menu_item_id}>
           <b>{line.quantity}×</b>
-          <span>{line.item_name}</span>
-          <small>{line.quantity === 1 ? "portion" : "portions"}{portionContents(line.unit_label) ? ` · ${portionContents(line.unit_label)} per portion` : ""}</small>
+          <span className="order-item-copy"><strong>{line.item_name}</strong><small>{line.quantity}×{money(Number(line.unit_price))} = {money(Number(line.unit_price) * line.quantity)}</small></span>
         </div>
       ))}
     </div>
   );
 }
-function CustomerContactActions({ phone }: { phone?: string }) {
+function CustomerContactActions({ phone, onEdit }: { phone?: string; onEdit?: () => void }) {
   const digits = (phone || "").replace(/\D/g, "");
-  if (!digits) return null;
+  if (!/^[6-9]\d{9}$/.test(digits)) return onEdit ? <button type="button" className="customer-add-phone" onClick={onEdit} title="Add a client phone number"><Phone size={13} /> Add phone</button> : null;
   const international = digits.length === 10 ? `91${digits}` : digits;
-  return <span className="customer-contact-actions" onClick={(event) => event.stopPropagation()}><a href={`tel:+${international}`} aria-label={`Call customer at ${phone}`} title="Call customer"><Phone size={15} /></a><a href={`https://wa.me/${international}`} target="_blank" rel="noreferrer" aria-label={`WhatsApp customer at ${phone}`} title="Message on WhatsApp"><MessageCircle size={15} /></a></span>;
+  return <span className="customer-contact-actions"><a href={`tel:+${international}`} aria-label={`Call customer at ${phone}`} title="Call customer"><Phone size={14} /></a><a href={`https://wa.me/${international}`} target="_blank" rel="noreferrer" aria-label={`WhatsApp customer at ${phone}`} title="Message on WhatsApp"><MessageCircle size={14} /></a>{onEdit && <button type="button" className="customer-edit-details" onClick={onEdit} aria-label="Edit client details" title="Edit client details"><CircleUserRound size={14} /></button>}</span>;
 }
-function OrderCard({ order, onEdit, onOpenCustomer, onUpdate, onDelete, onDeliver }: { order: Order; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
+function OrderCard({ order, onEdit, onEditCustomer, onAddItems, onNewOrderForCustomer, onOpenCustomer, onUpdate, onDelete, onDeliver, onShareDeliveryReminder }: { order: Order; onEdit: (o: Order) => void; onEditCustomer: (o: Order) => void; onAddItems: (o: Order) => void; onNewOrderForCustomer: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void; onShareDeliveryReminder: (o: Order) => void }) {
   const canDeliver = order.stage !== "delivered";
+  const isSettled = order.is_paid || order.payment_status === "verified";
   const paymentLabel = order.is_paid ? "Paid" : order.payment_status === "submitted" ? "Verify payment" : "Pending";
+  const remark = order.remarks.trim();
+  const hasSpecialRemark = remark.length > 1 && !["normal", "none", "no instructions", "no special instructions"].includes(remark.toLowerCase());
   return (
-    <article className={`card card-${order.stage}`} onClick={() => onEdit(order)}>
+    <article className={`card card-${order.stage}`}>
       <div className="card-body">
         <div className="card-top">
           <span className="card-stage-group"><StageBadge stage={order.stage} />{order.source === "customer" && <span className="source-badge">Online</span>}</span>
-          <button className={`${order.is_paid ? "paid yes" : "paid"} ${order.payment_status === "submitted" ? "submitted" : ""}`} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{paymentLabel}</button>
+          <span className="card-payment-summary"><button className={`${order.is_paid ? "paid yes" : "paid"} ${order.payment_status === "submitted" ? "submitted" : ""}`} onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { is_paid: !order.is_paid }); }}><Check size={13} />{paymentLabel}</button><strong>{money(Number(order.amount))}</strong></span>
         </div>
         <div className="card-summary-layout">
           <div className="card-summary-copy">
-            <div className="customer-line"><div><button className="customer-history-link" onClick={(event) => { event.stopPropagation(); onOpenCustomer(order); }}>{order.customer_name}</button><span>Flat {order.flat_number} · Tap name for all orders</span></div><CustomerContactActions phone={order.customer_phone} /><strong>{money(Number(order.amount))}</strong></div>
+            <div className="customer-line"><div><button className="customer-history-link" title={order.customer_name} onClick={(event) => { event.stopPropagation(); onOpenCustomer(order); }}>{order.customer_name}</button><span className="customer-identity-line"><span>Flat {order.flat_number}</span><CustomerContactActions phone={order.customer_phone} onEdit={() => onEditCustomer(order)} /></span></div></div>
             <OrderItemsSummary order={order} />
+            {hasSpecialRemark && <p className="order-remark"><b>Note</b><span>{remark}</span></p>}
           </div>
         </div>
-        {order.remarks && <p className="remark">{order.remarks}</p>}
         {order.payment_reference && <p className="payment-reference"><ReceiptText size={13} /><span>UPI reference</span><b>{order.payment_reference}</b></p>}
-        <div className="details"><span><Clock3 size={17} />{order.delivery_time?.slice(0, 5) || "Time not set"}</span><span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
+        <div className="details"><span><Clock3 size={17} />{order.delivery_time ? formatTime12(order.delivery_time) : "Time not set"}</span>{canDeliver && order.delivery_time && <button className="share-delivery-reminder compact-icon" onClick={() => onShareDeliveryReminder(order)} aria-label="Share delivery timing manually" title="Share delivery timing manually"><Share2 size={14} /></button>}{order.reminder_time && <span className="delivery-reminder"><Bell /> Reminder {formatTime12(order.reminder_time)}</span>}<span>Via {order.delivered_by === "nanny" ? "Nanny" : "Others"}</span></div>
         <div className="card-footer">
-          <span className="card-secondary-actions"><button className="edit-order" onClick={(e) => { e.stopPropagation(); onEdit(order); }}>Edit</button><button className="delete-order-action" onClick={(e) => { e.stopPropagation(); onDelete(order); }}><Trash2 size={13} /> Delete</button></span>
+          <span className="card-secondary-actions">{isSettled ? <button className="new-order-for-customer" onClick={() => onNewOrderForCustomer(order)}><Plus size={13} /> New order</button> : canDeliver && <button className="add-order-items" onClick={() => onAddItems(order)}><Plus size={13} /> Add items</button>}<button className="edit-order" onClick={() => onEdit(order)}><Pencil size={13} /> Edit</button><button className="delete-order-action" onClick={() => onDelete(order)}><Trash2 size={13} /> Delete</button></span>
           {canDeliver
-            ? <button className="move-order" onClick={(e) => { e.stopPropagation(); onDeliver(order); }}>Mark delivered<Check size={16} /></button>
-            : <button className="move-order restore-order" onClick={(e) => { e.stopPropagation(); onUpdate(order.id, { stage: "new" }); }}>Back to Orders<RotateCcw size={15} /></button>}
+            ? <button className="move-order" onClick={() => onDeliver(order)}>Mark delivered<DeliveryScooter size={16} /></button>
+            : <button className="move-order restore-order" onClick={() => onUpdate(order.id, { stage: "new" })}>Back to Orders<RotateCcw size={15} /></button>}
         </div>
       </div>
     </article>
   );
 }
 
-function Board({ orders, activeStage, onStage, onEdit, onOpenCustomer, onUpdate, onDelete, onDeliver }: { orders: Order[]; activeStage: Stage; onStage: (stage: Stage) => void; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void }) {
+function Board({ orders, fulfillmentFilter, onEdit, onEditCustomer, onAddItems, onNewOrderForCustomer, onOpenCustomer, onUpdate, onDelete, onDeliver, onShareDeliveryReminder }: { orders: Order[]; fulfillmentFilter: FulfillmentFilter; onEdit: (o: Order) => void; onEditCustomer: (o: Order) => void; onAddItems: (o: Order) => void; onNewOrderForCustomer: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void; onDeliver: (o: Order) => void; onShareDeliveryReminder: (o: Order) => void }) {
+  const visibleStages = fulfillmentFilter === "all" ? stages : stages.filter((stage) => stage.key === fulfillmentFilter);
   return (
-    <>
-      <div className="stage-tabs">
-        {stages.map((stage) => <button key={stage.key} className={`${stage.color} ${activeStage === stage.key ? "active" : ""}`} onClick={() => onStage(stage.key)}><i />{stage.short}<b>{orders.filter((o) => o.stage === stage.key).length}</b></button>)}
-      </div>
       <section className="board">
-        {stages.map((stage) => {
+        {visibleStages.map((stage) => {
           const stageOrders = orders.filter((o) => o.stage === stage.key);
-          return <div className={`column column-${stage.color} ${activeStage === stage.key ? "mobile-active" : ""}`} key={stage.key}>
+          return <div className={`column column-${stage.color}`} key={stage.key}>
             <div className="column-title"><span><i />{stage.label}</span><b>{stageOrders.length}</b></div>
             <div className="column-orders">
-              {stageOrders.map((o) => <OrderCard key={o.id} order={o} onEdit={onEdit} onOpenCustomer={onOpenCustomer} onUpdate={onUpdate} onDelete={onDelete} onDeliver={onDeliver} />)}
+              {stageOrders.map((o) => <OrderCard key={o.id} order={o} onEdit={onEdit} onEditCustomer={onEditCustomer} onAddItems={onAddItems} onNewOrderForCustomer={onNewOrderForCustomer} onOpenCustomer={onOpenCustomer} onUpdate={onUpdate} onDelete={onDelete} onDeliver={onDeliver} onShareDeliveryReminder={onShareDeliveryReminder} />)}
               {!stageOrders.length && <div className="column-empty"><Check size={18} /><span>No orders here</span></div>}
             </div>
           </div>;
         })}
       </section>
-    </>
   );
 }
 
-function OrderList({ orders, onEdit, onOpenCustomer, onUpdate, onDelete }: { orders: Order[]; onEdit: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
+function OrderList({ orders, onEdit, onEditCustomer, onOpenCustomer, onUpdate, onDelete }: { orders: Order[]; onEdit: (o: Order) => void; onEditCustomer: (o: Order) => void; onOpenCustomer: (o: Order) => void; onUpdate: (id: string, c: Partial<Order>) => void; onDelete: (o: Order) => void }) {
   return <div className="order-list">{orders.map((o, i) => {
-    return <div className="order-row" key={o.id} onClick={() => onEdit(o)}>
+    return <div className="order-row" key={o.id}>
       <span className="serial">{String(i + 1).padStart(2, "0")}</span>
-      <div className="row-customer"><button className="customer-history-link" onClick={(event) => { event.stopPropagation(); onOpenCustomer(o); }}>{o.customer_name}</button> <em>· Flat {o.flat_number}</em><CustomerContactActions phone={o.customer_phone} />{o.source === "customer" && <i className="online-order-tag">Online</i>}<OrderItemsSummary order={o} variant="list" /></div>
-      <span className="row-time"><Clock3 size={14} />{o.delivery_time?.slice(0, 5) || "Not set"}</span>
+      <div className="row-customer"><button className="customer-history-link" onClick={(event) => { event.stopPropagation(); onOpenCustomer(o); }}>{o.customer_name}</button> <em>· Flat {o.flat_number}</em><CustomerContactActions phone={o.customer_phone} onEdit={() => onEditCustomer(o)} />{o.source === "customer" && <i className="online-order-tag">Online</i>}<OrderItemsSummary order={o} variant="list" /></div>
+      <span className="row-time"><Clock3 size={14} />{o.delivery_time ? formatTime12(o.delivery_time) : "Not set"}</span>
       <b className="row-amount">{money(Number(o.amount))}</b>
       <StageBadge stage={o.stage} />
-      <button className={`${o.is_paid ? "paid yes" : "paid"} ${o.payment_status === "submitted" ? "submitted" : ""}`} title={o.payment_reference ? `UPI reference: ${o.payment_reference}` : undefined} onClick={(e) => { e.stopPropagation(); onUpdate(o.id, { is_paid: !o.is_paid }); }}>{o.is_paid ? "Paid" : o.payment_status === "submitted" ? "Verify" : "Pending"}</button>
-      <button className="row-delete-order" aria-label={`Delete ${o.customer_name}'s order`} title="Delete order" onClick={(event) => { event.stopPropagation(); onDelete(o); }}><Trash2 /></button>
+      <button className={`${o.is_paid ? "paid yes" : "paid"} ${o.payment_status === "submitted" ? "submitted" : ""}`} title={o.payment_reference ? `UPI reference: ${o.payment_reference}` : undefined} onClick={() => onUpdate(o.id, { is_paid: !o.is_paid })}>{o.is_paid ? "Paid" : o.payment_status === "submitted" ? "Verify" : "Pending"}</button>
+      <button className="row-edit-order" aria-label={`Edit ${o.customer_name}'s order`} title="Edit order" onClick={() => onEdit(o)}><Pencil /></button>
+      <button className="row-delete-order" aria-label={`Delete ${o.customer_name}'s order`} title="Delete order" onClick={() => onDelete(o)}><Trash2 /></button>
     </div>;
   })}</div>;
 }
 
-function CustomerHistoryModal({ history, loading, onSaveRemarks, onClose }: { history: CustomerHistory; loading: boolean; onSaveRemarks: (history: CustomerHistory, remarks: string) => Promise<void>; onClose: () => void }) {
-  const [range, setRange] = useState<"week" | "month" | "year" | "all">("all");
+function ClientDirectoryScreen({ customers, totalCustomers, stats, loading, error, search, sort, tower, onSearch, onSort, onTower, onOpenHistory, onEdit, onAdd }: {
+  customers: CustomerDirectoryEntry[];
+  totalCustomers: number;
+  stats: { clients: number; totalSpend: number; averageSpend: number; pending: number };
+  loading: boolean;
+  error: string;
+  search: string;
+  sort: CustomerDirectorySort;
+  tower: BuildingWing;
+  onSearch: (value: string) => void;
+  onSort: (value: CustomerDirectorySort) => void;
+  onTower: (value: BuildingWing) => void;
+  onOpenHistory: (customer: Pick<CustomerDirectoryEntry, "customer_name" | "flat_number" | "customer_phone">) => void;
+  onEdit: (customer: CustomerDirectoryEntry) => void;
+  onAdd: () => void;
+}) {
+  const lastOrderLabel = (value: string) => value ? new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date(value)) : "—";
+  return <>
+    <section className="page-heading client-directory-heading">
+      <div><span className="eyebrow">CUSTOMER DIRECTORY</span><h1>Clients</h1><p>Correct a name or flat once, then see every order under the same person.</p></div>
+      <button type="button" className="primary client-directory-add" onClick={onAdd}><Plus size={18} /> Add client</button>
+    </section>
+    <section className="client-directory-metrics" aria-label="Client metrics">
+      <Stat label="Clients" value={stats.clients} icon={<UsersRound />} />
+      <Stat label="All-time orders" value={money(stats.totalSpend)} icon={<IndianRupee />} />
+      <Stat label="Average client" value={money(stats.averageSpend)} icon={<ReceiptText />} />
+      <Stat label="Still pending" value={money(stats.pending)} tone="danger" icon={<Clock3 />} />
+    </section>
+    <section className="client-directory-controls">
+      <label className="search"><Search size={20} /><input value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Search name, flat, tower or phone" />{search && <button onClick={() => onSearch("")} aria-label="Clear client search"><X size={17} /></button>}</label>
+      <label className="client-sort"><span>Sort by</span><select value={sort} onChange={(event) => onSort(event.target.value as CustomerDirectorySort)}><option value="spend-desc">Highest spend</option><option value="spend-asc">Lowest spend</option><option value="recent">Most recent order</option><option value="pending">Most pending payment</option><option value="tower">Tower and flat</option><option value="name">Name A–Z</option></select></label>
+      {sort === "tower" && <div className="client-tower-filter" role="group" aria-label="Filter clients by tower"><span>Show tower</span><div><button type="button" className={!tower ? "active" : ""} aria-pressed={!tower} onClick={() => onTower("")}>All</button>{(["A", "B", "C", "D"] as const).map((wing) => <button type="button" key={wing} className={tower === wing ? "active" : ""} aria-pressed={tower === wing} onClick={() => onTower(wing)}>{wing}</button>)}</div></div>}
+    </section>
+    {loading ? <div className="empty"><span className="loader" /><strong>Loading clients…</strong></div> : error ? <div className="empty"><span className="empty-icon"><DatabaseBackup /></span><strong>Client directory needs its database update</strong><span>{error}</span></div> : !customers.length ? <div className="empty"><span className="empty-icon"><UsersRound /></span><strong>{search || tower ? "No matching clients" : "No clients yet"}</strong><span>{search || tower ? "Try another name, flat or tower." : "A client appears here after their first order."}</span></div> : <section className="client-directory-list" aria-label={`${customers.length} of ${totalCustomers} clients`}>
+      {customers.map((customer) => <article key={customer.customer_key} className="client-directory-card">
+        <div className="client-directory-card-head">
+          <div className="client-directory-identity">
+            <span className="client-flat">Flat {customer.flat_number}</span>
+            <div className="client-directory-name-row">
+              <h2>{customer.customer_name}</h2>
+              <div className="client-directory-inline-actions" aria-label={`Actions for ${customer.customer_name}`}>
+                <button type="button" onClick={() => onOpenHistory(customer)} title="View orders" aria-label={`View orders for ${customer.customer_name}`}><ReceiptText /></button>
+                <button type="button" className="edit-client" onClick={() => onEdit(customer)} title="Edit client details" aria-label={`Edit details for ${customer.customer_name}`}><Pencil /></button>
+              </div>
+            </div>
+            <small>{customer.customer_phone ? `+91 ${customer.customer_phone}` : "No phone saved"}</small>
+          </div>
+          <strong>{money(customer.total_spend)}</strong>
+        </div>
+        <div className="client-directory-card-metrics"><span><small>Orders</small><b>{customer.order_count}</b></span><span><small>Paid</small><b>{money(customer.paid_total)}</b></span><span className={customer.pending_total ? "due" : ""}><small>Pending</small><b>{money(customer.pending_total)}</b></span><span><small>Last order</small><b>{lastOrderLabel(customer.last_order_at)}</b></span></div>
+      </article>)}
+    </section>}
+  </>;
+}
+
+function ClientDirectoryEditModal({ customer, onClose, onSave }: { customer: CustomerDirectoryEntry; onClose: () => void; onSave: (customer: CustomerDirectoryEntry, values: Pick<CustomerDirectoryEntry, "customer_name" | "flat_number" | "customer_phone">) => Promise<void> }) {
+  const isNewClient = !customer.customer_key;
+  const originalFlat = splitAdminFlat(customer.flat_number);
+  const [name, setName] = useState(customer.customer_name);
+  const [wing, setWing] = useState<BuildingWing>(originalFlat.wing);
+  const [flat, setFlat] = useState(originalFlat.number);
+  const [phone, setPhone] = useState(customer.customer_phone);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (name.trim().length < 2) return setMessage("Enter the client’s name.");
+    if (!wing || !flat) return setMessage("Choose the tower and enter the flat number.");
+    if (!/^[6-9]\d{9}$/.test(phone.replace(/\D/g, ""))) return setMessage("Enter a valid 10-digit mobile number.");
+    setBusy(true);
+    setMessage("");
+    try {
+      await onSave(customer, { customer_name: name, flat_number: `${wing}-${flat}`, customer_phone: phone });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not save these client details.");
+      setBusy(false);
+    }
+  }
+  return <div className="modal-bg" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}><form className="modal client-edit-modal" onSubmit={save}>
+    <header className="customer-history-head"><div><span>CLIENT DETAILS</span><h2>{isNewClient ? "Add client" : `Edit ${customer.customer_name}`}</h2><p>{isNewClient ? "Add someone before their first order. Their phone number keeps future orders under this one client." : "Phone number keeps this client’s records together, even if their name or flat changes."}</p></div><button type="button" className="history-close" onClick={onClose} disabled={busy}>Close</button></header>
+    <div className="client-edit-fields"><label><span>Client name</span><input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required /></label><div className="flat-address-fields"><label><span>Tower</span><select value={wing} onChange={(event) => setWing(event.target.value as BuildingWing)} required><option value="" disabled>Choose</option>{["A", "B", "C", "D"].map((option) => <option key={option} value={option}>Tower {option}</option>)}</select></label><label><span>Flat number</span><input value={flat} onChange={(event) => setFlat(event.target.value.replace(/\D/g, "").slice(0, 5))} inputMode="numeric" required /></label></div><label><span>Mobile number</span><div className="phone-field"><b>+91</b><input value={phone} onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" autoComplete="tel-national" placeholder="10-digit mobile number" required /></div></label><small className="client-edit-help">{isNewClient ? "This creates one client record now, ready for their first order." : "Saving updates this client’s existing orders too, so the corrected name, flat and contact details are seen everywhere in the admin."}</small>{message && <div className="auth-message">{message}</div>}</div>
+    <footer className="client-edit-actions"><button type="button" className="secondary" onClick={onClose} disabled={busy}>Cancel</button><button className="primary" disabled={busy}>{busy ? "Saving…" : <><Save /> {isNewClient ? "Add client" : "Save client"}</>}</button></footer>
+  </form></div>;
+}
+
+function PendingPaymentsModal({ orders, loading, onClose, onSharePaymentNote, onShareWhatsAppPaymentNote, onMarkPaid }: { orders: Order[]; loading: boolean; onClose: () => void; onSharePaymentNote: (orders: Order[]) => void; onShareWhatsAppPaymentNote: (orders: Order[]) => void; onMarkPaid: (order: Order) => void }) {
+  const totalDue = orders.reduce((total, order) => total + Number(order.amount), 0);
+  const groups = Array.from(orders.reduce((all, order) => {
+    const key = customerKey(order);
+    all.set(key, [...(all.get(key) || []), order]);
+    return all;
+  }, new Map<string, Order[]>()).values());
+  return <div className="modal-bg payment-desk-bg" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className="modal payment-desk-modal" role="dialog" aria-modal="true" aria-labelledby="payment-desk-title">
+      <header className="payment-desk-head">
+        <div><span>PAYMENT FOLLOW-UPS</span><h2 id="payment-desk-title">Pending payments</h2><p>Every unpaid order, oldest first — including previous days.</p></div>
+        <button type="button" className="history-close" onClick={onClose}>Close</button>
+      </header>
+      <div className="payment-desk-total"><span><IndianRupee /><b>{orders.length} order{orders.length === 1 ? "" : "s"} awaiting payment</b></span><strong>{money(totalDue)}</strong></div>
+      <p className="payment-desk-note">Each person’s button creates one clear payment note with every unpaid online order, its order number, date and item details. Nothing sends until you choose an app. Cash stays separate.</p>
+      {loading ? <p className="customer-history-loading">Loading pending payments…</p> : orders.length ? <div className="payment-desk-list">{groups.map((group) => {
+        const customer = group[0];
+        const online = group.filter((order) => order.payment_method !== "cash" && order.payment_status !== "submitted");
+        return <section className="payment-customer-group" key={customerKey(customer)}><header><span><b>{customer.customer_name}</b><small>Flat {customer.flat_number} · {online.length} unpaid online order{online.length === 1 ? "" : "s"}</small></span>{online.length > 0 && <div className="payment-customer-share"><button type="button" onClick={() => onSharePaymentNote(online)}><Share2 /> Share</button><button type="button" className="whatsapp-payment-note" onClick={() => onShareWhatsAppPaymentNote(online)}><MessageCircle /> WhatsApp</button></div>}</header>{group.map((order) => {
+        const isCash = order.payment_method === "cash";
+        const awaitingVerification = order.payment_status === "submitted";
+        return <article key={order.id}>
+          <div className="payment-desk-order-head"><span><b>{orderNumber(order)}</b><small>{dateLabel(order.order_date)} · Flat {order.flat_number}{order.stage === "delivered" ? " · Delivered" : " · Open order"}</small></span><strong>{money(Number(order.amount))}</strong></div>
+          <OrderItemsSummary order={order} variant="dialog" />
+          <div className="payment-desk-order-foot"><span className={`payment-followup-state ${isCash ? "cash" : awaitingVerification ? "submitted" : "due"}`}>{isCash ? <Banknote /> : awaitingVerification ? <Clock3 /> : <IndianRupee />}{isCash ? "Cash / hand payment" : awaitingVerification ? "Payment reference received" : "Online payment due"}</span><div><button type="button" className="mark-payment-paid" onClick={() => onMarkPaid(order)}><Check /> Mark paid</button></div></div>
+        </article>;
+      })}</section>; })}</div> : <div className="payment-desk-empty"><Check /><b>Nothing awaiting payment</b><span>Paid orders leave this list automatically.</span></div>}
+    </section>
+  </div>;
+}
+
+function CustomerHistoryModal({ history, loading, onSaveRemarks, onSharePaymentNote, onShareWhatsAppPaymentNote, onClose }: { history: CustomerHistory; loading: boolean; onSaveRemarks: (history: CustomerHistory, remarks: string) => Promise<void>; onSharePaymentNote: (orders: Order[]) => void; onShareWhatsAppPaymentNote: (orders: Order[]) => void; onClose: () => void }) {
+  const [range, setRange] = useState<"today" | "yesterday" | "7" | "15" | "30" | "year" | "all" | "custom">("today");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [remarks, setRemarks] = useState(history.admin_remarks);
   const [saving, setSaving] = useState(false);
-  const now = new Date();
+  const currentDate = today();
   const filtered = history.orders.filter((order) => {
     const date = order.order_date;
     if (from && date < from) return false;
     if (to && date > to) return false;
-    if (range === "all" || from || to) return true;
-    const cutoff = new Date(now); cutoff.setDate(cutoff.getDate() - (range === "week" ? 7 : range === "month" ? 31 : 365));
-    return new Date(`${date}T00:00:00`) >= cutoff;
+    if (range === "custom") return Boolean(from || to);
+    if (range === "all") return true;
+    if (from || to) return true;
+    if (range === "today") return date === currentDate;
+    if (range === "yesterday") return date === shift(currentDate, -1);
+    if (range === "year") return date >= shift(currentDate, -364) && date <= currentDate;
+    const days = Number(range);
+    return date >= shift(currentDate, -(days - 1)) && date <= currentDate;
   });
   const totalSpend = history.orders.reduce((sum, order) => sum + Number(order.amount), 0);
   const filteredSpend = filtered.reduce((sum, order) => sum + Number(order.amount), 0);
   const latestOrder = history.orders[0];
+  const pendingOrdersInRange = filtered.filter((order) => !order.is_paid && order.payment_status !== "verified" && order.payment_status !== "submitted" && order.payment_method !== "cash");
   return <div className="modal-bg customer-history-bg" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="modal customer-history-modal" role="dialog" aria-modal="true" aria-labelledby="customer-history-title">
       <header className="customer-history-head">
-        <div><span>CLIENT ORDER HISTORY</span><h2 id="customer-history-title">{history.customer_name}</h2><p>Flat {history.flat_number} · Text-only record</p><CustomerContactActions phone={history.customer_phone} /></div>
+        <div><span>CLIENT ORDER HISTORY</span><h2 id="customer-history-title">{history.customer_name}</h2><p>Flat {history.flat_number} · Order history</p><CustomerContactActions phone={history.customer_phone} /></div>
         <button type="button" className="history-close" onClick={onClose}>Close</button>
       </header>
-      {loading ? <p className="customer-history-loading">Loading order history…</p> : <><div className="customer-history-metrics"><span><b>{history.orders.length}</b><small>All orders</small></span><span><b>{money(totalSpend)}</b><small>Total business</small></span><span><b>{history.orders.length ? money(totalSpend / history.orders.length) : "₹0"}</b><small>Average order</small></span><span><b>{latestOrder ? dateLabel(latestOrder.order_date) : "—"}</b><small>Last order</small></span></div><div className="customer-history-filter"><button className={range === "week" && !from && !to ? "active" : ""} onClick={() => { setRange("week"); setFrom(""); setTo(""); }}>Week</button><button className={range === "month" && !from && !to ? "active" : ""} onClick={() => { setRange("month"); setFrom(""); setTo(""); }}>Month</button><button className={range === "year" && !from && !to ? "active" : ""} onClick={() => { setRange("year"); setFrom(""); setTo(""); }}>Year</button><button className={range === "all" && !from && !to ? "active" : ""} onClick={() => { setRange("all"); setFrom(""); setTo(""); }}>All time</button><label>From<input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label></div><div className="customer-history-period"><b>{filtered.length} orders · {money(filteredSpend)}</b></div>{filtered.length ? <div className="customer-history-list">{filtered.map((order) => {
-        const payment = order.payment_method === "cash" ? "Cash on delivery" : order.is_paid || order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending";
-        return <article key={order.id}><div><b>{dateLabel(order.order_date)}</b><span>{order.delivery_time?.slice(0, 5) || "Delivery time not set"}</span></div><strong>{money(Number(order.amount))}</strong><p>{order.order_details}</p><small>{order.stage === "delivered" ? "Delivered" : "Open order"} · {payment}</small></article>;
-      })}</div> : <p className="customer-history-loading">No orders in this period.</p>}<div className="customer-history-remarks"><label>Private admin remarks<textarea value={remarks} placeholder="For example: prefers mild food, reliable customer, follow up for special offers…" onChange={(event) => setRemarks(event.target.value)} /></label><button disabled={saving} onClick={async () => { setSaving(true); try { await onSaveRemarks(history, remarks); } finally { setSaving(false); } }}>{saving ? "Saving…" : "Save remarks"}</button></div></>}
+      {loading ? <p className="customer-history-loading">Loading order history…</p> : <>
+        <div className="customer-history-metrics" aria-label="Customer order summary">
+          <span><small>Orders</small><b>{history.orders.length}</b></span>
+          <span><small>Total spent</small><b>{money(totalSpend)}</b></span>
+          <span><small>Average order</small><b>{history.orders.length ? money(totalSpend / history.orders.length) : "₹0"}</b></span>
+          <span><small>Most recent</small><b>{latestOrder ? dateLabel(latestOrder.order_date) : "—"}</b></span>
+        </div>
+        <section className="customer-history-filter" aria-label="Filter customer order history">
+          <span className="customer-history-filter-label">Show orders from</span>
+          <div className="customer-history-range-buttons" role="group" aria-label="Quick date ranges">
+            <button className={range === "today" ? "active" : ""} onClick={() => { setRange("today"); setFrom(""); setTo(""); }}>Today</button>
+            <button className={range === "yesterday" ? "active" : ""} onClick={() => { setRange("yesterday"); setFrom(""); setTo(""); }}>Yesterday</button>
+            <button className={range === "7" ? "active" : ""} onClick={() => { setRange("7"); setFrom(""); setTo(""); }}>7 days</button>
+            <button className={range === "15" ? "active" : ""} onClick={() => { setRange("15"); setFrom(""); setTo(""); }}>15 days</button>
+            <button className={range === "30" ? "active" : ""} onClick={() => { setRange("30"); setFrom(""); setTo(""); }}>30 days</button>
+            <button className={range === "year" ? "active" : ""} onClick={() => { setRange("year"); setFrom(""); setTo(""); }}>Year</button>
+            <button className={range === "all" ? "active" : ""} onClick={() => { setRange("all"); setFrom(""); setTo(""); }}>All time</button>
+            <button className={range === "custom" ? "active" : ""} onClick={() => setRange("custom")}>Custom</button>
+          </div>
+          {range === "custom" && <div className="customer-history-date-range">
+            <label><span>From</span><input type="date" value={from} onChange={(event) => setFrom(event.target.value)} /></label>
+            <label><span>To</span><input type="date" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+          </div>}
+        </section>
+        <div className="customer-history-period"><b>{filtered.length} order{filtered.length === 1 ? "" : "s"} · {money(filteredSpend)}</b></div>
+        <section className="customer-payment-note"><div><span>PAYMENT NOTE</span><b>{pendingOrdersInRange.length ? `${pendingOrdersInRange.length} unpaid online order${pendingOrdersInRange.length === 1 ? "" : "s"} · ${money(pendingOrdersInRange.reduce((sum, order) => sum + Number(order.amount), 0))}` : "No unpaid online orders in this range"}</b><small>Share anywhere sends plain text. WhatsApp uses clean bold headings; cash / hand payments stay separate.</small></div><div className="customer-payment-note-actions"><button type="button" disabled={!pendingOrdersInRange.length} onClick={() => onSharePaymentNote(pendingOrdersInRange)}><Share2 /> Share anywhere</button><button type="button" className="whatsapp-payment-note" disabled={!pendingOrdersInRange.length} onClick={() => onShareWhatsAppPaymentNote(pendingOrdersInRange)}><MessageCircle /> WhatsApp</button></div></section>
+        {filtered.length ? <div className="customer-history-list">{filtered.map((order) => {
+          const payment = order.payment_method === "cash" ? "Cash" : order.is_paid || order.payment_status === "verified" ? "Paid" : order.payment_status === "submitted" ? "Payment sent" : "Payment pending";
+          return <article key={order.id}>
+            <div className="customer-history-order-top"><span><b>{dateLabel(order.order_date)}</b><small>{order.delivery_time ? formatTime12(order.delivery_time) : "Time not set"}</small></span><strong>{money(Number(order.amount))}</strong></div>
+            <OrderItemsSummary order={order} variant="dialog" />
+            <div className="customer-history-order-status"><StageBadge stage={order.stage} /><span className={order.is_paid || order.payment_status === "verified" ? "paid yes" : "paid"}>{payment}</span></div>
+          </article>;
+        })}</div> : <p className="customer-history-loading">No orders in this period.</p>}
+        <div className="customer-history-remarks"><label><span>Private admin note</span><textarea value={remarks} placeholder="For example: prefers mild food, reliable customer, follow up for special offers…" onChange={(event) => setRemarks(event.target.value)} /></label><button disabled={saving} onClick={async () => { setSaving(true); try { await onSaveRemarks(history, remarks); } finally { setSaving(false); } }}>{saving ? "Saving…" : "Save note"}</button></div>
+      </>}
     </section>
   </div>;
 }
@@ -1957,6 +2611,7 @@ function CustomerHistoryModal({ history, loading, onSaveRemarks, onClose }: { hi
 function MenuScreen({ items, categories, settings, onSaveSettings, onUploadBanner, onDaily, onAdd, onEdit, onPromote, onToggleArchive, onAddCategory, onEditCategory, onPromoteCategory, onToggleCategory, onShowAll, onHideAll, onRepeatYesterday, onOrder }: { items: MenuItem[]; categories: DishCategory[]; settings: AdminStoreSettings; onSaveSettings: (settings: AdminStoreSettings) => void; onUploadBanner: (file: File) => Promise<string>; onDaily: (item: MenuItem, changes: Partial<NonNullable<MenuItem["daily"]>>) => void; onAdd: () => void; onEdit: (item: MenuItem) => void; onPromote: (item: MenuItem) => void; onToggleArchive: (item: MenuItem) => void; onAddCategory: () => void; onEditCategory: (category: DishCategory) => void; onPromoteCategory: (category: DishCategory) => void; onToggleCategory: (category: DishCategory) => void; onShowAll: () => void; onHideAll: () => void; onRepeatYesterday: () => void; onOrder: (item: MenuItem) => void }) {
   const [form, setForm] = useState(settings);
   const [upiQr, setUpiQr] = useState("");
+  const [menuSearch, setMenuSearch] = useState("");
   useEffect(() => setForm(settings), [settings]);
   useEffect(() => {
     if (!form.upi_id.trim()) return setUpiQr("");
@@ -1968,6 +2623,7 @@ function MenuScreen({ items, categories, settings, onSaveSettings, onUploadBanne
   const shownCount = activeItems.filter((item) => item.daily?.is_available).length;
   const featuredCount = activeItems.filter((item) => item.daily?.is_available && item.daily?.is_featured).length;
   const categoryName = (item: MenuItem) => categories.find((category) => category.id === item.category_id)?.name || "Other dishes";
+  const visibleMenuItems = items.filter((item) => !menuSearch.trim() || `${item.name} ${item.description || ""} ${categoryName(item)}`.toLowerCase().includes(menuSearch.trim().toLowerCase()));
   return (
     <>
       <section className="page-heading menu-heading"><div><span className="eyebrow">DISH CATALOGUE</span><span className="page-title-with-info"><h1>Menu</h1><InfoTip label="About menu">Manage dishes, categories, availability and featured dishes.</InfoTip></span></div><button className="primary" onClick={onAdd}><Plus size={20} /> Add dish</button></section>
@@ -1975,16 +2631,16 @@ function MenuScreen({ items, categories, settings, onSaveSettings, onUploadBanne
         <div className="manager-heading"><span className="settings-icon"><ShoppingBagIcon /></span><div><h2>Customer storefront</h2><p>Control today’s public ordering page without changing the family order desk.</p></div><a href="/" target="_blank" rel="noreferrer">Open storefront <ChevronRight size={16} /></a></div>
         <div className="manager-fields">
           <label className="ordering-toggle"><input type="checkbox" checked={form.ordering_open} onChange={(event) => set("ordering_open", event.target.checked)} /><span><b>{form.ordering_open ? "Orders open" : "Orders paused"}</b><small>Customers {form.ordering_open ? "can place new orders" : "can browse but cannot order"}</small></span></label>
-          <label><span>Customer message</span><textarea className="auto-grow" rows={1} value={form.hero_message} onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("hero_message", event.target.value)} /></label>
           <label className="ordering-toggle"><input type="checkbox" checked={form.announcement_enabled} onChange={(event) => set("announcement_enabled", event.target.checked)} /><span><b>Show kitchen announcement</b><small>Displays a bold offer or update above today’s menu</small></span></label>
+          <label className="wide photo-upload"><span>Announcement image <small>Optional</small></span><input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { set("announcement_image_path", await onUploadBanner(file)); } catch { /* upload feedback appears when saving */ } }} /><small>{form.announcement_image_path ? "Image attached. Save storefront to publish it." : "Optional image for a festive message, notice or special offer."}</small></label>
+          <label><span>Customer message</span><textarea className="auto-grow" rows={1} value={form.hero_message} onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("hero_message", event.target.value)} /></label>
           <label><span>Announcement headline</span><textarea className="auto-grow" rows={1} value={form.announcement_title} maxLength={90} placeholder="For example: Sunday special — free delivery" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("announcement_title", event.target.value)} /></label>
           <label className="wide"><span>Announcement details <small>Optional</small></span><textarea className="auto-grow" rows={1} value={form.announcement_message} maxLength={180} placeholder="For example: Order before 5 PM. Limited portions available." onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => set("announcement_message", event.target.value)} /></label>
-          <label className="wide photo-upload"><span>Announcement image <small>Optional</small></span><input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { set("announcement_image_path", await onUploadBanner(file)); } catch { /* upload feedback appears when saving */ } }} /><small>{form.announcement_image_path ? "Image attached. Save storefront to publish it." : "Optional image for a festive message, notice or special offer."}</small></label>
           <label><span>Kitchen UPI ID</span><input value={form.upi_id} onChange={(event) => set("upi_id", event.target.value)} placeholder="yourname@bank" /></label>
           <label><span>Merchant name</span><input value={form.merchant_name} onChange={(event) => set("merchant_name", event.target.value)} /></label>
           <label><span>Order cutoff</span><input type="time" value={form.order_cutoff} onChange={(event) => set("order_cutoff", event.target.value)} /></label>
           <button className="primary manager-save" onClick={() => onSaveSettings(form)}><Check size={18} /> Save storefront</button>
-          <button className="secondary" disabled={!form.announcement_title.trim() && !form.announcement_message.trim()} onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(["❤️ *Neeru’s Home Kitchen*", "", form.announcement_title.trim() ? `*${form.announcement_title.trim()}*` : "", form.announcement_message.trim(), "", "Order here: " + window.location.origin].filter(Boolean).join("\n"))}`, "_blank", "noopener,noreferrer")}>Share announcement on WhatsApp</button>
+          <button className="secondary" disabled={!form.announcement_title.trim() && !form.announcement_message.trim()} onClick={() => window.open(`https://wa.me/?text=${encodeURIComponent(["*Neeru’s Home Kitchen*", "", form.announcement_title.trim() ? `*${form.announcement_title.trim()}*` : "", form.announcement_message.trim(), "", "Order here: " + window.location.origin].filter(Boolean).join("\n"))}`, "_blank", "noopener,noreferrer")}>Share announcement on WhatsApp</button>
         </div>
         <div className="payment-preview">
           <div className="payment-preview-copy"><span className="payment-preview-icon"><ReceiptText /></span><div><b>UPI Direct payment</b><small>After checkout, customers see an order-specific QR and submit their UPI reference. The kitchen verifies it before marking the order paid.</small><strong>{form.upi_id || "Add a UPI ID above to activate the QR"}</strong></div></div>
@@ -1999,14 +2655,16 @@ function MenuScreen({ items, categories, settings, onSaveSettings, onUploadBanne
         })}</div>
       </section>
       <div className="daily-menu-toolbar"><div className="daily-menu-label"><span><CalendarDays size={17} /> Today’s customer menu</span><small>{shownCount} shown · {featuredCount} featured · {items.length - activeItems.length} archived</small></div><div className="daily-menu-actions"><button onClick={onRepeatYesterday}><RotateCcw size={14} /> Repeat yesterday</button><button onClick={onShowAll}><Check size={14} /> Show all</button><button onClick={onHideAll}><X size={14} /> Clear today</button></div></div>
-      <section className="menu-grid">
-        {items.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} data-menu-id={item.id} key={item.id}>
+      <div className="menu-catalogue-search"><label><Search size={18} /><input value={menuSearch} onChange={(event) => setMenuSearch(event.target.value)} placeholder="Search a dish to edit, update or add to an order" aria-label="Search menu dishes" />{menuSearch && <button type="button" onClick={() => setMenuSearch("")} aria-label="Clear menu search"><X size={16} /></button>}</label><span>{visibleMenuItems.length} of {items.length} dishes</span></div>
+      <section className={`menu-grid ${menuSearch.trim() ? "is-filtered" : ""}`}>
+        {visibleMenuItems.map((item) => <article className={`menu-card ${item.is_active ? "" : "archived"}`} data-menu-id={item.id} key={item.id}>
           <button className="menu-image" disabled={!item.is_active} onClick={() => onOrder(item)}>{item.photo_url ? <img src={item.photo_url} alt={item.name} loading="lazy" decoding="async" /> : <span><ChefHat /></span>}<em>{item.is_active ? "Add admin order" : "Archived"}</em></button>
           <div className="menu-copy"><div><small className="menu-category-tag">{categoryName(item)}</small><h2>{item.name}</h2><span>{item.daily?.special_price !== null && item.daily?.special_price !== undefined ? `${money(item.daily.special_price)} today · ${money(item.price)} / portion regular` : `${money(item.price)} / portion`}{portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)} per portion` : ""}</span></div><div className="menu-card-actions"><button className="promote-food" disabled={!item.is_active} onClick={() => onPromote(item)} aria-label={`Promote ${item.name} on WhatsApp`} title="Promote on WhatsApp"><MessageCircle size={15} /></button><button onClick={() => onEdit(item)} aria-label={`Edit ${item.name}`}><Pencil size={15} /></button><button className="remove-food" onClick={() => onToggleArchive(item)} aria-label={`${item.is_active ? "Archive" : "Restore"} ${item.name}`}>{item.is_active ? <Archive size={16} /> : <RotateCcw size={16} />}</button></div></div>
           {item.description && <p className="menu-description">{item.description}</p>}
           <div className="daily-controls"><button className={item.daily?.is_available ? "selected" : ""} disabled={!item.is_active} onClick={() => onDaily(item, { is_available: !item.daily?.is_available, is_featured: item.daily?.is_available ? false : item.daily?.is_featured })}><Check size={14} /> {item.daily?.is_available ? "Shown" : "Hidden"}</button><button className={item.daily?.is_featured ? "selected featured" : ""} disabled={!item.is_active || !item.daily?.is_available} onClick={() => onDaily(item, { is_featured: !item.daily?.is_featured })}><FlameIcon /> Featured</button><label><span>Today’s price</span><input type="number" min="0" placeholder={String(item.price)} disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.special_price ?? ""} onChange={(event) => onDaily(item, { special_price: event.target.value === "" ? null : Number(event.target.value) })} /></label><label><span>Portions</span><input type="number" min="0" placeholder="∞" disabled={!item.is_active || !item.daily?.is_available} value={item.daily?.portions_available ?? ""} onChange={(event) => onDaily(item, { portions_available: event.target.value === "" ? null : Number(event.target.value) })} /></label></div>
         </article>)}
       </section>
+      {!visibleMenuItems.length && <div className="menu-search-empty"><Search size={20} /><b>No dishes found</b><span>Try another dish name, category, or a shorter search.</span></div>}
     </>
   );
 }
@@ -2042,7 +2700,7 @@ function InfoTip({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, storefrontSettings, whatsappNumber, onLarge, onDark, onSaveStorefront, onUploadBanner, onPrepareExport, onCreateBackup, onRestoreBackup, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onUpdateAccount, onSignOut }: {
+function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, paymentSettings, storefrontSettings, whatsappNumber, phonePushStatus, onLarge, onDark, onSaveStorefront, onUploadBanner, onPrepareExport, onCreateBackup, onRestoreBackup, onLoadStorage, onCleanup, onSavePayment, onRemovePaymentQr, onSaveCustomerContact, onEnablePhonePush, onDisablePhonePush, onUpdateAccount, onRefresh, onSignOut }: {
   large: boolean;
   dark: boolean;
   selectedDate: string;
@@ -2051,6 +2709,7 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   paymentSettings: AdminStoreSettings;
   storefrontSettings: AdminStoreSettings;
   whatsappNumber: string;
+  phonePushStatus: PhonePushStatus;
   onLarge: (large: boolean) => void;
   onDark: (dark: boolean) => void;
   onSaveStorefront: (settings: AdminStoreSettings) => void;
@@ -2063,7 +2722,10 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   onSavePayment: (values: PaymentSettingsUpdate, qrPhoto?: File) => Promise<void>;
   onRemovePaymentQr: () => Promise<void>;
   onSaveCustomerContact: (whatsappNumber: string) => Promise<void>;
+  onEnablePhonePush: () => Promise<string>;
+  onDisablePhonePush: () => Promise<string>;
   onUpdateAccount: (values: AdminAccountUpdate) => Promise<string>;
+  onRefresh: () => void;
   onSignOut: () => void;
 }) {
   const [exportOptions, setExportOptions] = useState<ExportOptions>({ from: selectedDate, to: selectedDate, payment: "all" });
@@ -2084,6 +2746,9 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
   const [contactBusy, setContactBusy] = useState(false);
   const [contactMessage, setContactMessage] = useState("");
   const [contactError, setContactError] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushMessage, setPushMessage] = useState("");
+  const [pushError, setPushError] = useState(false);
   const [storeForm, setStoreForm] = useState(storefrontSettings);
   useEffect(() => {
     setStoreForm(storefrontSettings);
@@ -2360,27 +3025,44 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
     }
   }
 
+  async function togglePhonePush() {
+    setPushBusy(true);
+    setPushMessage("");
+    setPushError(false);
+    try {
+      setPushMessage(phonePushStatus === "enabled" ? await onDisablePhonePush() : await onEnablePhonePush());
+    } catch (error) {
+      setPushError(true);
+      setPushMessage(error instanceof Error ? error.message : "Could not update phone alerts.");
+    } finally {
+      setPushBusy(false);
+    }
+  }
+
   return (
     <>
       <section className="page-heading settings-heading">
         <div><span className="eyebrow">KITCHEN CONTROL CENTRE</span><span className="page-title-with-info"><h1>Settings</h1><InfoTip label="About settings">Manage payments, appearance, exports and kitchen records securely.</InfoTip></span></div>
       </section>
       <section className="settings-grid">
+        <article className="settings-card refresh-settings-card">
+          <button type="button" className="primary refresh-app-button" onClick={onRefresh}><RotateCcw size={17} /> Refresh app</button>
+          <InfoTip label="About refreshing the app"><><b>Use this if anything looks old.</b> This safely reloads the family desk with the latest version and current kitchen data.</></InfoTip>
+        </article>
         <article className="settings-card storefront-settings-card">
           <div className="settings-title"><span className="settings-icon"><Settings /></span><div><h2>Customer storefront</h2><small>Orders, customer message and announcements.</small></div></div>
           <div className="settings-form">
-            <label className="ordering-toggle"><input type="checkbox" checked={storeForm.ordering_open} onChange={(event) => setStoreForm((current) => ({ ...current, ordering_open: event.target.checked }))} /><span><b>{storeForm.ordering_open ? "Orders open" : "Orders paused"}</b><small>Allow customers to place orders</small></span></label>
-            <label className="wide-setting-field"><span>Customer message</span><textarea className="auto-grow" rows={1} value={storeForm.hero_message} onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, hero_message: event.target.value }))} /></label>
-            <label className="ordering-toggle"><input type="checkbox" checked={storeForm.announcement_enabled} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_enabled: event.target.checked }))} /><span><b>Show announcement</b><small>Display an offer or update above the customer menu</small></span></label>
-            <label className="wide-setting-field"><span>Announcement headline</span><textarea className="auto-grow" rows={1} value={storeForm.announcement_title} maxLength={90} placeholder="For example: Sunday special — free delivery" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_title: event.target.value }))} /></label>
-            <label className="wide-setting-field"><span>Announcement details <small>Optional</small></span><textarea className="auto-grow" rows={1} value={storeForm.announcement_message} maxLength={180} placeholder="For example: Order before 5 PM. Limited portions available." onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_message: event.target.value }))} /></label>
-            <label className="wide-setting-field photo-upload">
-              <span><Camera size={18} /> Banner image <small>Optional</small></span>
-              <input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { const path = await onUploadBanner(file); setStoreForm((current) => ({ ...current, announcement_image_path: path })); } catch (error) { alert(error instanceof Error ? error.message : "Could not upload the banner image."); } finally { event.currentTarget.value = ""; } }} />
-              <div className="photo-drop banner-photo-drop">
-                {storeForm.announcement_image_path ? <><img src={`${photoApiBase}?key=${encodeURIComponent(storeForm.announcement_image_path)}`} alt="Selected announcement banner" /><small>Banner image attached. Save storefront to publish it.</small></> : <><Camera /><b>Choose banner from Photos or Files</b><small>Optional: add an offer poster, celebration image or kitchen announcement graphic.</small></>}
+            <div className="storefront-content-block wide-setting-field">
+              <div className="storefront-content-head"><span><Camera size={18} /> Banner image <small>Optional</small></span><label className="storefront-visibility"><input type="checkbox" checked={storeForm.show_banner_image} onChange={(event) => setStoreForm((current) => ({ ...current, show_banner_image: event.target.checked }))} /><b>{storeForm.show_banner_image ? "Visible" : "Hidden"}</b></label></div>
+              <div className="banner-upload-control">
+                <label className="photo-upload"><input type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { const path = await onUploadBanner(file); setStoreForm((current) => ({ ...current, announcement_image_path: path })); } catch (error) { alert(error instanceof Error ? error.message : "Could not upload the banner image."); } finally { event.currentTarget.value = ""; } }} /><div className="photo-drop banner-photo-drop">{storeForm.announcement_image_path ? <><img src={`${photoApiBase}?key=${encodeURIComponent(storeForm.announcement_image_path)}`} alt="Selected announcement banner" onError={() => setStoreForm((current) => current.announcement_image_path ? ({ ...current, announcement_image_path: "" }) : current)} /><small>{storeForm.show_banner_image ? "Visible on storefront after saving." : "Saved, but hidden on the storefront."}</small></> : <><Camera /><b>Choose banner from Photos or Files</b><small>Optional: add an offer poster, celebration image or kitchen announcement graphic.</small></>}</div></label>
+                {storeForm.announcement_image_path && <button type="button" className="clear-banner-image" aria-label="Clear banner image" title="Clear banner image" onClick={() => setStoreForm((current) => ({ ...current, announcement_image_path: "" }))}><X size={17} /></button>}
               </div>
-            </label>
+            </div>
+            <div className="storefront-content-block wide-setting-field"><div className="storefront-content-head"><span>Customer message <small>Optional</small></span><label className="storefront-visibility"><input type="checkbox" checked={storeForm.show_customer_message} onChange={(event) => setStoreForm((current) => ({ ...current, show_customer_message: event.target.checked }))} /><b>{storeForm.show_customer_message ? "Visible" : "Hidden"}</b></label></div><textarea className="auto-grow" rows={1} value={storeForm.hero_message} placeholder="A warm message for customers" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, hero_message: event.target.value }))} /></div>
+            <div className="storefront-content-block wide-setting-field"><div className="storefront-content-head"><span>Announcement headline <small>Optional</small></span><label className="storefront-visibility"><input type="checkbox" checked={storeForm.show_announcement_title} onChange={(event) => setStoreForm((current) => ({ ...current, show_announcement_title: event.target.checked }))} /><b>{storeForm.show_announcement_title ? "Visible" : "Hidden"}</b></label></div><textarea className="auto-grow" rows={1} value={storeForm.announcement_title} maxLength={90} placeholder="For example: Sunday special — free delivery" onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_title: event.target.value }))} /></div>
+            <div className="storefront-content-block wide-setting-field"><div className="storefront-content-head"><span>Announcement details <small>Optional</small></span><label className="storefront-visibility"><input type="checkbox" checked={storeForm.show_announcement_message} onChange={(event) => setStoreForm((current) => ({ ...current, show_announcement_message: event.target.checked }))} /><b>{storeForm.show_announcement_message ? "Visible" : "Hidden"}</b></label></div><textarea className="auto-grow" rows={1} value={storeForm.announcement_message} maxLength={180} placeholder="For example: Order before 5 PM. Limited portions available." onInput={(event) => autoGrow(event.currentTarget)} onChange={(event) => setStoreForm((current) => ({ ...current, announcement_message: event.target.value }))} /></div>
+            <label className="ordering-toggle storefront-ordering-toggle"><input type="checkbox" checked={storeForm.ordering_open} onChange={(event) => setStoreForm((current) => ({ ...current, ordering_open: event.target.checked }))} /><span><b>{storeForm.ordering_open ? "Orders open" : "Orders paused"}</b><small>Allow customers to place orders</small></span></label>
             <button className="primary settings-save" onClick={() => onSaveStorefront(storeForm)}><Save size={17} /> Save storefront</button>
           </div>
         </article>
@@ -2428,6 +3110,15 @@ function SettingsScreen({ large, dark, selectedDate, customerCount, adminEmail, 
             {contactMessage && <p className={`settings-message ${contactError ? "error" : "success"}`} role="status">{contactMessage}</p>}
             <button className="primary settings-save" disabled={contactBusy}><Save size={17} /> {contactBusy ? "Saving contact…" : "Save WhatsApp contact"}</button>
           </form>
+        </article>
+
+        <article className="settings-card phone-alerts-card">
+          <div className="settings-title"><span className="settings-icon"><Smartphone /></span><div className="settings-title-copy"><span className="settings-title-line"><h2>Phone delivery alerts</h2><InfoTip label="About phone alerts">These are private notifications for the kitchen team, not messages to customers. Once enabled on this phone, a scheduled delivery reminder can alert you even while the order desk is closed. On iPhone, install this app to the Home Screen first, then allow notifications.</InfoTip></span></div></div>
+          <div className="phone-alerts-copy">
+            <p><b>{phonePushStatus === "enabled" ? "Alerts are on for this phone" : phonePushStatus === "blocked" ? "Notifications are blocked" : phonePushStatus === "unsupported" ? "This browser cannot receive phone alerts" : phonePushStatus === "setup-required" ? "Phone alerts need final secure setup" : phonePushStatus === "checking" ? "Checking this phone…" : "Turn on phone alerts"}</b><span>{phonePushStatus === "enabled" ? "You will receive a private delivery alert when a saved reminder is due." : phonePushStatus === "blocked" ? "Allow notifications in this phone’s browser or app settings, then return here." : phonePushStatus === "unsupported" ? "Use Safari from the installed Home Screen app on iPhone, or Chrome on Android." : phonePushStatus === "setup-required" ? "The app is ready; its secure delivery service must be configured before any phone can subscribe." : "Keep desk sounds for when the app is open, and add phone alerts for when it is closed or in the background."}</span></p>
+            {pushMessage && <p className={`settings-message ${pushError ? "error" : "success"}`} role="status">{pushMessage}</p>}
+            <button className="primary settings-save" onClick={togglePhonePush} disabled={pushBusy || phonePushStatus === "checking" || phonePushStatus === "unsupported" || phonePushStatus === "blocked" || phonePushStatus === "setup-required"}><Bell size={17} /> {pushBusy ? "Updating phone alerts…" : phonePushStatus === "enabled" ? "Turn off phone alerts" : "Turn on phone alerts"}</button>
+          </div>
         </article>
 
         <article className="settings-card">
@@ -2561,9 +3252,9 @@ function TimeField({ value, onChange, label = "Delivery time", optional = false,
       {open && (
         <div className="time-panel">
           <div className="time-panel-head"><b>Select {label.toLowerCase()}</b><div>{optional && value && <button type="button" className="time-clear" onClick={() => onChange("")}>Clear</button>}<button type="button" onClick={() => setOpen(false)}>Done</button></div></div>
-          <div className="time-section"><span>Hour</span><div className="time-grid hours">{Array.from({ length: 12 }, (_, index) => index + 1).map((option) => <button type="button" className={hour === option ? "selected" : ""} key={option} onClick={() => update(option, minute, period)}>{String(option).padStart(2, "0")}</button>)}</div></div>
+          <div className="time-section"><span>Hour (12-hour clock)</span><div className="time-grid hours">{Array.from({ length: 12 }, (_, index) => index + 1).map((option) => <button type="button" className={hour === option ? "selected" : ""} key={option} onClick={() => update(option, minute, period)}>{String(option).padStart(2, "0")}</button>)}</div></div>
           <div className="time-section"><span>Minutes</span><div className="time-grid minutes">{quarterHourMinutes.map((option) => <button type="button" className={minute === option ? "selected" : ""} key={option} onClick={() => update(hour, option, period)}>{option}</button>)}</div></div>
-          <div className="time-section period-section"><span>Period</span><div className="time-grid period">{["AM", "PM"].map((option) => <button type="button" className={period === option ? "selected" : ""} key={option} onClick={() => update(hour, minute, option)}>{option}</button>)}</div></div>
+          <div className="time-section period-section"><span>AM or PM</span><div className="time-grid period">{["AM", "PM"].map((option) => <button type="button" className={period === option ? "selected" : ""} key={option} onClick={() => update(hour, minute, option)}>{option}</button>)}</div></div>
         </div>
       )}
     </div>
@@ -2574,10 +3265,10 @@ function CompleteDeliveryModal({ order, busy, onClose, onConfirm }: { order: Ord
   return (
     <div className="modal-bg delivery-confirm-bg" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
       <section className="modal delivery-confirm-modal">
-        <div className="delivery-confirm-head"><span className="delivery-confirm-icon"><Check /></span><div><span className="eyebrow">COMPLETE DELIVERY</span><h2>Mark as delivered?</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={busy}><X /></button></div>
+        <div className="delivery-confirm-head"><span className="delivery-confirm-icon"><DeliveryScooter /></span><div><span className="eyebrow">COMPLETE DELIVERY</span><h2>Mark as delivered?</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={busy}><X /></button></div>
         <div className="delivery-confirm-summary"><span><b>{order.customer_name}</b><small>Flat {order.flat_number}</small></span><strong>{money(Number(order.amount))}</strong><p>{order.order_details}</p></div>
         <div className="delivery-confirm-note"><ShieldCheck /><span><b>{order.photo_path ? "Temporary photo will be removed" : "Ready to complete"}</b><small>{order.photo_path ? "The private order photo is deleted and verified before the status changes. The order record and totals remain available under Delivered." : "The order record and totals remain available under Delivered. You can move it back to Orders later if needed."}</small></span></div>
-        <div className="delivery-confirm-actions"><button type="button" className="cancel" onClick={onClose} disabled={busy}>Keep in Orders</button><button type="button" className="confirm-delivery" onClick={onConfirm} disabled={busy}><Check size={18} /> {busy ? "Completing safely…" : "Mark delivered"}</button></div>
+        <div className="delivery-confirm-actions"><button type="button" className="cancel" onClick={onClose} disabled={busy}>Keep in Orders</button><button type="button" className="confirm-delivery" onClick={onConfirm} disabled={busy}><DeliveryScooter /> {busy ? "Completing safely…" : "Mark delivered"}</button></div>
       </section>
     </div>
   );
@@ -2611,7 +3302,7 @@ function DeleteOrderModal({ order, busy, onClose, onConfirm }: { order: Order; b
   );
 }
 
-function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: { draft: Draft | Order; menuItems: MenuItem[]; customers: CustomerProfile[]; onClose: () => void; onSave: (d: Draft, photo?: File) => void; onDelete?: () => void }) {
+function OrderForm({ draft, addingItems = false, menuItems, categories, customers, onClose, onSave, onDelete }: { draft: Draft | Order; addingItems?: boolean; menuItems: MenuItem[]; categories: DishCategory[]; customers: CustomerProfile[]; onClose: () => void; onSave: (d: Draft, photo?: File) => void; onDelete?: () => void }) {
   const prefill = !('id' in draft) ? sessionStorage.getItem("neeru-prefill") : null;
   const prefillItem = prefill ? JSON.parse(prefill) as MenuItem : null;
   const initialOrderLines: OrderLine[] = draft.items?.length ? draft.items : prefillItem ? [{ menu_item_id: prefillItem.id, item_name: prefillItem.name, unit_price: Number(prefillItem.daily?.special_price ?? prefillItem.price), quantity: 1, unit_label: prefillItem.unit_label || "portion" }] : [];
@@ -2626,7 +3317,26 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
   const [flatDigits, setFlatDigits] = useState(initialFlat.number);
   const [allowNoWing, setAllowNoWing] = useState(Boolean(initialFlat.number && !initialFlat.wing && "id" in draft));
   const [flatWarning, setFlatWarning] = useState("");
+  const [dishSearch, setDishSearch] = useState("");
+  const [dishCategory, setDishCategory] = useState("all");
+  const initialReminderMode = reminderOffsets.includes(Number(draft.reminder_offset_minutes) as typeof reminderOffsets[number])
+    ? String(draft.reminder_offset_minutes)
+    : draft.reminder_time ? "custom" : "none";
+  const [reminderMode, setReminderMode] = useState<"none" | "custom" | `${typeof reminderOffsets[number]}`>(initialReminderMode as "none" | "custom" | `${typeof reminderOffsets[number]}`);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setForm((v) => ({ ...v, [key]: value }));
+  const updateDeliveryTime = (value: string) => {
+    setForm((current) => ({
+      ...current,
+      delivery_time: value,
+      reminder_time: reminderOffsets.includes(Number(reminderMode) as typeof reminderOffsets[number]) ? timeEarlier(value, Number(reminderMode)) : current.reminder_time,
+    }));
+  };
+  const chooseReminder = (mode: "none" | "custom" | `${typeof reminderOffsets[number]}`) => {
+    setReminderMode(mode);
+    if (mode === "none") return setForm((current) => ({ ...current, reminder_time: "", reminder_offset_minutes: null }));
+    if (mode === "custom") return setForm((current) => ({ ...current, reminder_offset_minutes: null }));
+    setForm((current) => ({ ...current, reminder_time: current.delivery_time ? timeEarlier(current.delivery_time, Number(mode)) : "", reminder_offset_minutes: Number(mode) }));
+  };
   const setCustomerFlat = (flatNumber: string) => {
     const parsed = splitAdminFlat(flatNumber);
     setFlatWing(parsed.wing);
@@ -2675,32 +3385,40 @@ function OrderForm({ draft, menuItems, customers, onClose, onSave, onDelete }: {
     if (existing) return applyOrderLines(orderLines.map((line) => line.menu_item_id === item.id ? { ...line, quantity: line.quantity + 1 } : line));
     applyOrderLines([...orderLines, { menu_item_id: item.id, item_name: item.name, unit_price: Number(item.daily?.special_price ?? item.price), quantity: 1, unit_label: item.unit_label || "portion" }]);
   };
+  const activeDishCategories = categories.filter((category) => category.is_active && menuItems.some((item) => item.is_active && (item.category_ids || [item.category_id]).includes(category.id)));
+  const visibleFoodChoices = menuItems.filter((item) => {
+    if (!item.is_active) return false;
+    const inCategory = dishCategory === "all" || (item.category_ids || [item.category_id]).includes(dishCategory);
+    const query = dishSearch.trim().toLowerCase();
+    return inCategory && (!query || `${item.name} ${item.description || ""}`.toLowerCase().includes(query));
+  });
   return (
     <div className="modal-bg" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <form className="modal order-modal" onSubmit={(e) => { e.preventDefault(); if ((!flatWing && !allowNoWing) || !flatDigits) { setFlatWarning(!flatWing ? "Choose the tower." : "Enter the flat number."); return; } onSave({ ...form, flat_number: flatWing ? `${flatWing}-${flatDigits}` : flatDigits }, photo); }}>
-        <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{"id" in draft ? "Edit order" : "New order"}</h2><p>Customer, food and delivery details</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
+        <div className="modal-head"><div><span className="eyebrow">{form.order_date}</span><h2>{addingItems ? "Add dishes to this order" : "id" in draft ? "Edit order" : "New order"}</h2><p>{addingItems ? "The customer and delivery details stay as they are. Choose only the extra dishes." : "Customer, food and delivery details"}</p></div><button type="button" className="icon-button" onClick={onClose}><X /></button></div>
         <div className="form-grid">
-          <CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
-          <label><span>Customer phone <small>Optional</small></span><input type="tel" inputMode="numeric" value={form.customer_phone || ""} onChange={(event) => set("customer_phone", event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" /></label>
+          {addingItems ? <div className="wide add-items-order-context"><span>ADDING TO</span><b>{form.customer_name} · Flat {form.flat_number}</b><small>{form.delivery_time ? `Delivery at ${formatTime12(form.delivery_time)}` : "Delivery time not set"} · Existing dishes remain in this order</small></div> : <><CustomerField value={form.customer_name} customers={customers} onChange={updateCustomerName} onSelect={selectCustomer} />
+          <label><span>Customer phone</span><input type="tel" inputMode="numeric" value={form.customer_phone || ""} onChange={(event) => set("customer_phone", event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="10-digit mobile number" required /></label>
           <div className={`admin-flat-fields ${flatWarning ? "has-warning" : ""}`}>
             <label><span>Tower</span><select value={flatWing} onChange={(event) => updateFlatWing(event.target.value as BuildingWing)} required={!allowNoWing}><option value="" disabled={!allowNoWing}>{allowNoWing ? "No tower (existing)" : "Choose"}</option>{["A", "B", "C", "D"].map((wing) => <option key={wing} value={wing}>Tower {wing}</option>)}</select></label>
             <label><span>Flat number</span><input type="text" inputMode="numeric" pattern="[0-9]*" maxLength={5} value={flatDigits} onChange={(event) => updateFlatNumber(event.target.value)} placeholder="For example, 402" aria-invalid={Boolean(flatWarning)} required /></label>
             {flatWarning && <small className="admin-flat-warning">{flatWarning}</small>}
-          </div>
-          <div className="wide food-picker"><label>Choose dishes</label><div className="food-options">{menuItems.filter((item) => item.is_active).map((item) => { const selected = orderLines.find((line) => line.menu_item_id === item.id); return <button type="button" key={item.id} className={selected ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" loading="lazy" decoding="async" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? `${money(Number(item.daily?.special_price ?? item.price))} / portion${portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)}` : ""}` : ""}</small>{selected && <em>{selected.quantity}×</em>}</button>; })}</div></div>
+          </div></>}
+          <div className="wide food-picker"><label>Choose dishes</label><div className="food-picker-tools"><label className="food-picker-search"><Search size={16} /><input value={dishSearch} onChange={(event) => setDishSearch(event.target.value)} placeholder="Search dishes" aria-label="Search dishes" />{dishSearch && <button type="button" onClick={() => setDishSearch("")} aria-label="Clear dish search"><X size={15} /></button>}</label><div className="food-picker-categories" role="group" aria-label="Filter dishes by category"><button type="button" className={dishCategory === "all" ? "active" : ""} onClick={() => setDishCategory("all")}>All dishes</button>{activeDishCategories.map((category) => <button type="button" key={category.id} className={dishCategory === category.id ? "active" : ""} onClick={() => setDishCategory(category.id)}>{category.name}</button>)}</div></div>{visibleFoodChoices.length ? <div className={`food-options ${dishSearch.trim() ? "is-filtered" : ""}`}>{visibleFoodChoices.map((item) => { const selected = orderLines.find((line) => line.menu_item_id === item.id); return <button type="button" key={item.id} className={selected ? "selected" : ""} onClick={() => selectFood(item)}>{item.photo_url ? <img src={item.photo_url} alt="" loading="lazy" decoding="async" /> : <span><ChefHat /></span>}<b>{item.name}</b><small>{item.price ? `${money(Number(item.daily?.special_price ?? item.price))} / portion${portionContents(item.unit_label) ? ` · ${portionContents(item.unit_label)}` : ""}` : ""}</small>{selected && <em>{selected.quantity}×</em>}</button>; })}</div> : <div className="food-picker-empty"><Search size={17} /><span>No dishes found. Try another category or search.</span></div>}</div>
           <div className="wide admin-order-lines"><span className="admin-order-lines-title">Portions ordered</span>{orderLines.length ? orderLines.map((line) => <article key={line.menu_item_id}><span><b>{line.item_name}</b><small>{money(line.unit_price)} / portion{portionContents(line.unit_label) ? ` · ${portionContents(line.unit_label)} per portion` : ""}</small></span><div className="admin-line-quantity"><button type="button" aria-label={`Decrease ${line.item_name} portions`} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity - 1 } : entry))}><Minus /></button><b>{line.quantity}</b><button type="button" aria-label={`Increase ${line.item_name} portions`} disabled={line.quantity >= 20} onClick={() => applyOrderLines(orderLines.map((entry) => entry.menu_item_id === line.menu_item_id ? { ...entry, quantity: entry.quantity + 1 } : entry))}><Plus /></button></div><strong>{money(line.unit_price * line.quantity)}</strong><button type="button" aria-label={`Remove ${line.item_name}`} className="remove-order-line" onClick={() => applyOrderLines(orderLines.filter((entry) => entry.menu_item_id !== line.menu_item_id))}><X /></button></article>) : <p>Tap a dish above to add it, then set the number of portions here.</p>}</div>
           <Field label="Order summary" value={form.order_details} onChange={(v) => set("order_details", v)} wide />
-          <TimeField value={form.delivery_time || ""} onChange={(v) => set("delivery_time", v)} />
+          <TimeField value={form.delivery_time || ""} onChange={updateDeliveryTime} />
+          <fieldset className="wide reminder-field"><legend>Delivery reminder <small>Optional</small></legend><p>Choose a reminder now, then set the delivery time whenever you are ready.</p><div className="reminder-options" role="group" aria-label="Choose delivery reminder"><button type="button" className={reminderMode === "none" ? "selected" : ""} onClick={() => chooseReminder("none")}>No reminder</button>{reminderOffsets.map((minutes) => <button type="button" key={minutes} className={reminderMode === String(minutes) ? "selected" : ""} onClick={() => chooseReminder(String(minutes) as `${typeof reminderOffsets[number]}`)}>{minutes === 60 ? "1 hour earlier" : `${minutes} min earlier`}</button>)}<button type="button" className={reminderMode === "custom" ? "selected" : ""} onClick={() => chooseReminder("custom")}>Custom time</button></div>{reminderMode !== "none" && !form.delivery_time && <small className="reminder-summary"><Bell /> Set a delivery time to finish this reminder.</small>}{reminderMode === "custom" && <TimeField value={form.reminder_time || ""} onChange={(value) => set("reminder_time", value)} label="Custom reminder time" optional className="custom-reminder-time" />}{form.reminder_time && <small className="reminder-summary"><Bell /> Reminder set for {formatTime12(form.reminder_time)}</small>}</fieldset>
           <Field label="Amount (₹)" type="number" value={String(form.amount)} onChange={(v) => set("amount", Number(v))} />
           <Choice label="Delivered by" options={[["nanny", "Nanny"], ["others", "Others"]]} value={form.delivered_by} onChange={(v) => set("delivered_by", v as DeliveryBy)} />
           {"id" in draft && draft.payment_reference && <div className="wide payment-proof"><ReceiptText size={19} /><span><small>Customer submitted UPI reference</small><b>{draft.payment_reference}</b></span></div>}
           <label className="paid-choice"><input type="checkbox" checked={form.is_paid} onChange={(e) => set("is_paid", e.target.checked)} /><span><Check size={18} /> Payment received</span></label>
           <fieldset className="wide stage-field"><legend>Order stage</legend><div className="stage-choice">{stages.map((s) => <button type="button" className={`${s.color} ${form.stage === s.key ? "selected" : ""}`} key={s.key} onClick={() => set("stage", s.key)}><i />{s.short}</button>)}</div></fieldset>
-          <Field label="Remarks / special instructions" value={form.remarks} onChange={(v) => set("remarks", v)} wide textarea />
+          <Field label="Remarks / special instructions (optional)" value={form.remarks} onChange={(v) => set("remarks", v)} wide textarea required={false} />
           <div className="wide quick">{["Less spicy", "No onion", "Extra pickle", "Call before delivery", "Send curd", "No green chilli"].map((t) => <button type="button" key={t} onClick={() => set("remarks", form.remarks ? `${form.remarks}, ${t}` : t)}><Plus size={13} />{t}</button>)}</div>
           <label className="wide photo-upload"><span><Camera size={18} /> Add a temporary order photo <small>Optional</small></span><input type="file" accept="image/*" capture="environment" onChange={(e) => { const file = e.target.files?.[0]; setPhoto(file); if (file) setPhotoPreview(URL.createObjectURL(file)); }} /><div className="photo-drop">{photoPreview ? <img src={photoPreview} alt="Selected order" /> : <><Camera /><b>Take photo or choose from phone</b><small>{form.photo_path ? "A photo is attached. A replacement will be compressed automatically." : "Compressed to a tiny 360 px thumbnail and deleted after delivery"}</small></>}</div></label>
         </div>
-        <div className="modal-actions">{onDelete && <button type="button" className="delete" onClick={onDelete}><Trash2 size={18} /> Delete order</button>}<span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check size={19} /> Save order</button></div>
+        <div className="modal-actions">{onDelete && !addingItems && <button type="button" className="delete" onClick={onDelete}><Trash2 size={18} /> Delete order</button>}<span /><button type="button" className="cancel" onClick={onClose}>Cancel</button><button className="save"><Check size={19} /> {addingItems ? "Add dishes" : "Save order"}</button></div>
       </form>
     </div>
   );
