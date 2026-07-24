@@ -1,13 +1,12 @@
 {
-  "name": "Neeru's Kitchen",
-  "short_name": "Neeru's",
+  "name": "Neeru's Home Kitchen",
+  "short_name": "Neeru's Home",
   "description": "Fresh vegetarian home-cooked meals, prepared with care.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#fbfaf7",
   "theme_color": "#ee5728",
   "icons": [
-    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "/neeru-logo.png", "sizes": "1254x1254", "type": "image/png" }
   ]
 }

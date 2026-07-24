@@ -1,8 +1,8 @@
-# Neeru's Kitchen — Project Record
+# Neeru's Home Kitchen — Project Record
 
 Last updated: 22 July 2026
 
-This file records the accounts and services used to operate the Neeru's Kitchen family order manager. It intentionally contains no passwords, API keys, recovery codes, or other secrets.
+This file records the accounts and services used to operate the Neeru's Home Kitchen family order manager. It intentionally contains no passwords, API keys, recovery codes, or other secrets.
 
 ## GitHub
 
@@ -33,6 +33,17 @@ The deployed app requires these variables in Netlify:
 
 - `VITE_SUPABASE_URL`
 - `VITE_SUPABASE_PUBLISHABLE_KEY`
+
+Optional WhatsApp Business Cloud API variables for automatic kitchen order alerts:
+
+- `WHATSAPP_ACCESS_TOKEN`
+- `WHATSAPP_PHONE_NUMBER_ID`
+- `WHATSAPP_GRAPH_API_VERSION`
+- `WHATSAPP_ORDER_TEMPLATE_NAME`
+- `WHATSAPP_ORDER_TEMPLATE_LANGUAGE`
+- `WHATSAPP_ORDER_TEMPLATE_HAS_IMAGE`
+
+Without these optional credentials, customer orders still reach the admin notification centre immediately and the confirmation screen provides a one-tap, prefilled WhatsApp order copy. Never place the WhatsApp access token in client code or a committed file.
 
 Their values must stay in Netlify's environment settings or a local ignored `.env.local` file. Do not place their values in this document. Never commit a Supabase service-role key, a password, or a personal access token to GitHub.
 
